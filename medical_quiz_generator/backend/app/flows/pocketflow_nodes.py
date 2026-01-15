@@ -2,12 +2,11 @@
 PocketFlow Nodes for Medical Quiz Generation
 Implements the workflow nodes for document processing, RAG, and question generation
 """
+import re
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 import asyncio
 import json
-
-from requests import options
 import structlog
 
 # PocketFlow-style base classes (simplified implementation)
@@ -219,9 +218,27 @@ class ContextRetrievalNode(BaseNode):
     
     async def post(self, shared_state: Dict[str, Any], prep_result: Any, exec_result: List[RetrievedContext]) -> str:
         """Store retrieved contexts"""
+
+        language = shared_state.get('language', 'vi')
+
+        # 🔒 FIX 1: LỌC CONTEXT THEO NGÔN NGỮ
+        if language == "vi":
+            filtered_contexts = []
+            for ctx in exec_result:
+                text = ctx.content.lower()
+                # heuristic đơn giản để nhận diện tiếng Việt
+                if any(ch in text for ch in "ăâđêôơưáàảãạíìỉĩịúùủũụýỳỷỹỵ"):
+                    filtered_contexts.append(ctx)
+
+            exec_result = filtered_contexts
+
         shared_state['retrieved_contexts'] = exec_result
-        
-        logger.info("Contexts retrieved", count=len(exec_result))
+
+        logger.info(
+            "Contexts retrieved (after language filter)",
+            language=language,
+            count=len(exec_result)
+        )
         
         if len(exec_result) == 0:
             return "no_contexts"
@@ -378,15 +395,20 @@ class QuestionGenerationNode(BatchNode):
         """Get system prompt based on language"""
         if language == 'vi':
             return """Bạn là một chuyên gia y khoa giàu kinh nghiệm trong việc tạo câu hỏi trắc nghiệm cho đào tạo y khoa.
-                    Bạn tạo các câu hỏi chất lượng cao, chính xác về mặt y khoa và phù hợp với chuẩn giáo dục y khoa.
 
-                    Quy tắc:
-                        1. Câu hỏi phải dựa trên nội dung được cung cấp
-                        2. Đáp án đúng phải được hỗ trợ bởi nội dung gốc
-                        3. Các đáp án nhiễu phải hợp lý nhưng rõ ràng là sai
-                        4. Giải thích phải chi tiết và mang tính giáo dục
-                        5. Sử dụng thuật ngữ y khoa chuẩn
-                    Luôn trả về JSON hợp lệ."""
+                        ⚠️ QUY TẮC BẮT BUỘC (KHÔNG ĐƯỢC VI PHẠM):
+                        - BẮT BUỘC viết 100% nội dung bằng TIẾNG VIỆT
+                        - TUYỆT ĐỐI KHÔNG sử dụng tiếng Anh, kể cả thuật ngữ
+                        - Nếu nội dung gốc có tiếng Anh, PHẢI dịch sang tiếng Việt chuẩn y khoa
+                        - Nếu vi phạm, câu trả lời bị coi là KHÔNG HỢP LỆ
+
+                        YÊU CẦU CHUYÊN MÔN:
+                            1. Câu hỏi phải dựa trên nội dung được cung cấp
+                            2. Đáp án đúng phải được hỗ trợ bởi nội dung gốc
+                            3. Các đáp án nhiễu phải hợp lý nhưng rõ ràng là sai
+                            4. Giải thích phải chi tiết và mang tính giáo dục
+                            5. Sử dụng thuật ngữ y khoa chuẩn tiếng Việt
+                        LUÔN LUÔN trả về JSON hợp lệ và KHÔNG kèm markdown."""
         else:
             return """You are an expert medical educator specializing in creating high-quality multiple choice questions for medical training.
                         You create accurate, clinically relevant questions that follow medical education standards.
@@ -615,27 +637,34 @@ class QuestionValidationNode(BaseNode):
         return shared_state.get('generated_questions', [])
 
     async def exec(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Validate questions"""
         validated = []
+
+        language = self.shared_state.get("language", "vi") \
+            if hasattr(self, "shared_state") else "vi"
 
         for q in questions:
             if not isinstance(q, dict):
-                logger.error(
-                    "Invalid question item",
-                    type=type(q).__name__,
-                    value=str(q)[:100]
-                )
                 continue
+
+            # 🔒 FIX 3: CHẶN TIẾNG ANH
+            if language == "vi":
+                text = (q.get("question_text", "") + " " + q.get("explanation", "")).lower()
+                if re.search(r"\b(the|is|are|which|what|based on|according to)\b", text):
+                    logger.warning(
+                        "Filtered English question",
+                        question=q.get("question_text", "")[:50]
+                    )
+                    continue
 
             if self._is_valid_question(q):
                 validated.append(q)
             else:
                 logger.warning(
                     "Invalid question filtered",
-                    question=q.get('question_text', '')[:50]
+                    question=q.get("question_text", "")[:50]
                 )
-
         return validated
+
 
     async def post(
         self,

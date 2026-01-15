@@ -87,14 +87,6 @@ export default function Layout({ children }: LayoutProps) {
                             )
                         })}
                     </nav>
-
-                    {/* Footer */}
-                    <div className="p-4 border-t border-gray-200">
-                        <div className="px-4 py-3 bg-primary-50 rounded-lg">
-                            <p className="text-xs text-primary-700 font-medium">Powered by AI</p>
-                            <p className="text-xs text-primary-600 mt-1">PocketFlow + RAG</p>
-                        </div>
-                    </div>
                 </div>
             </aside>
 
