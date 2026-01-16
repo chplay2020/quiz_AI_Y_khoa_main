@@ -21,7 +21,6 @@ export default function Generate() {
         document_ids: [],
         num_questions: 10,
         difficulty: 'medium',
-        language: 'vi',
         include_case_based: false,
         include_explanations: true,
         enable_double_check: true, // AI double-check enabled by default
@@ -59,9 +58,16 @@ export default function Generate() {
             interval = setInterval(async () => {
                 try {
                     const status = await questionsApi.getGenerationStatus(currentTaskId)
-                    setGenerationStatus(status)
+                    setGenerationStatus(prev => {
+                        if (prev?.questions?.length && !status.questions) {
+                            return { ...status, questions: prev.questions }
+                        }
+                        return status
+                    })
+
 
                     if (status.status === 'completed' || status.status === 'failed') {
+                        clearInterval(interval)      // 🔥 DÒNG QUAN TRỌNG
                         setIsPolling(false)
                         if (status.status === 'completed') {
                             const reviewMsg = status.review_stats
@@ -204,21 +210,6 @@ export default function Generate() {
                                     <option value="easy">Dễ</option>
                                     <option value="medium">Trung bình</option>
                                     <option value="hard">Khó</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="label">Ngôn ngữ</label>
-                                <select
-                                    className="input"
-                                    value={config.language}
-                                    onChange={(e) => setConfig(prev => ({
-                                        ...prev,
-                                        language: e.target.value
-                                    }))}
-                                >
-                                    <option value="vi">Tiếng Việt</option>
-                                    <option value="en">English</option>
                                 </select>
                             </div>
 

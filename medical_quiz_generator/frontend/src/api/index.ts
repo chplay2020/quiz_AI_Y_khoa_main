@@ -68,7 +68,6 @@ export interface GenerationRequest {
     question_types?: string[]
     topics?: string[]
     focus_areas?: string[]
-    language?: string
     include_case_based?: boolean
     include_explanations?: boolean
     enable_double_check?: boolean

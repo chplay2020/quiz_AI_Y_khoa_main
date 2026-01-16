@@ -16,7 +16,7 @@ interface LayoutProps {
 }
 
 const navigation = [
-    { name: 'Dashboard', href: '/', icon: HomeIcon },
+    { name: 'Trang chủ', href: '/', icon: HomeIcon },
     { name: 'Tài liệu', href: '/documents', icon: DocumentTextIcon },
     { name: 'Tạo câu hỏi', href: '/generate', icon: SparklesIcon },
     { name: 'Ngân hàng câu hỏi', href: '/questions', icon: QuestionMarkCircleIcon },
@@ -41,7 +41,7 @@ export default function Layout({ children }: LayoutProps) {
                             <Bars3Icon className="w-6 h-6" />
                         )}
                     </button>
-                    <h1 className="text-lg font-semibold text-primary-600">Medical Quiz Generator</h1>
+                    <h1 className="text-lg font-semibold text-primary-600">Trắc nghiệm Y khoa AI</h1>
                     <div className="w-10" />
                 </div>
             </div>
@@ -58,7 +58,7 @@ export default function Layout({ children }: LayoutProps) {
                             <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
                                 <SparklesIcon className="w-5 h-5 text-white" />
                             </div>
-                            <span className="text-lg font-bold text-gray-900">MedQuiz AI</span>
+                            <span className="text-lg font-bold text-gray-900">MedQuiz VN</span>
                         </Link>
                     </div>
 

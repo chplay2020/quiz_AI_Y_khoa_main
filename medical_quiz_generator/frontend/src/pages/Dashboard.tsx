@@ -47,7 +47,7 @@ export default function Dashboard() {
         <div className="space-y-8">
             {/* Welcome Section */}
             <div className="bg-gradient-to-r from-primary-600 to-primary-800 rounded-2xl p-8 text-white">
-                <h1 className="text-3xl font-bold mb-2">Medical Quiz Generator</h1>
+                <h1 className="text-3xl font-bold mb-2">Trắc nghiệm Y khoa AI</h1>
                 <p className="text-primary-100 text-lg mb-6">
                     Tạo câu hỏi trắc nghiệm y khoa tự động từ tài liệu với AI
                 </p>
