@@ -119,7 +119,6 @@ class QuestionGenerationRequest(BaseModel):
     question_types: Optional[List[QuestionType]] = None
     topics: Optional[List[str]] = None
     focus_areas: Optional[List[str]] = None
-    language: str = "vi"  # Vietnamese default
     include_case_based: bool = False
     include_explanations: bool = True
     enable_double_check: bool = False  # Disabled by default to avoid rate limits

@@ -2,6 +2,7 @@
 Question Generation API Routes
 Handles question generation, retrieval, and management
 """
+from unittest import result
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional, List
 import uuid
@@ -47,7 +48,7 @@ async def generate_questions_background(
         )
         
         logger.info("Starting flow execution", task_id=task_id)
-        
+
         result = await flow.run({
             'document_ids': request.document_ids,
             'num_questions': request.num_questions,
@@ -55,11 +56,23 @@ async def generate_questions_background(
             'question_types': [qt.value for qt in request.question_types] if request.question_types else ['single_choice'],
             'topics': request.topics,
             'focus_areas': request.focus_areas,
-            'language': request.language,
+            'language': 'vi',  # Luôn sử dụng tiếng Việt
             'enable_double_check': getattr(request, 'enable_double_check', True)
         })
         
         logger.info("Flow execution completed", task_id=task_id)
+
+        
+        # ✅ FIX TREO TASK KHI KHÔNG CÓ CONTEXT
+        if not result.get("retrieved_contexts"):
+            logger.error("NO CONTEXT RETRIEVED – END TASK EARLY", task_id=task_id)
+            generation_tasks[task_id]["status"] = "completed"
+            generation_tasks[task_id]["questions"] = []
+            generation_tasks[task_id]["total_questions"] = 0
+            generation_tasks[task_id]["generated_questions"] = 0
+            generation_tasks[task_id]["progress"] = 1.0
+            generation_tasks[task_id]["error"] = "No context retrieved from documents"
+            return
         
         # Debug log
         logger.info("Flow result received", result_type=type(result).__name__, 
@@ -74,6 +87,13 @@ async def generate_questions_background(
         
         # Get reviewed questions (with AI double-check results)
         questions = result.get('reviewed_questions', result.get('validated_questions', []))
+        # 🔍 DEBUG: kiểm tra ngôn ngữ câu hỏi thực tế
+        if questions:
+            q = questions[0]
+            logger.warning(
+                "SAMPLE QUESTION",
+                question_text=q.get("question_text", "")[:200]
+            )
         review_stats = result.get('review_stats', {})
         
         # Store questions
