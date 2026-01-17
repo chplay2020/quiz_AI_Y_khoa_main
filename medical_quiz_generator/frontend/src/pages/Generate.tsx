@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
     SparklesIcon,
@@ -9,12 +9,14 @@ import {
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
-import { documentsApi, questionsApi, GenerationRequest, GenerationStatus } from '../api'
+import { documentsApi, questionsApi, GenerationRequest, GenerationStatus, Question } from '../api'
 import { useAppStore } from '../store'
 import QuestionCard from '../components/QuestionCard'
+import QuestionEditModal from '../components/QuestionEditModal'
 
 export default function Generate() {
     const navigate = useNavigate()
+    const queryClient = useQueryClient()
     const { selectedDocuments, currentTaskId, setCurrentTaskId } = useAppStore()
 
     const [config, setConfig] = useState<GenerationRequest>({
@@ -28,6 +30,32 @@ export default function Generate() {
 
     const [generationStatus, setGenerationStatus] = useState<GenerationStatus | null>(null)
     const [isPolling, setIsPolling] = useState(false)
+
+    // Edit modal state
+    const [editingQuestion, setEditingQuestion] = useState<Question | null>(null)
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false)
+
+    // Update question mutation
+    const updateMutation = useMutation({
+        mutationFn: ({ id, updates }: { id: string; updates: Partial<Question> }) =>
+            questionsApi.update(id, updates),
+        onSuccess: (data, variables) => {
+            // Cập nhật question trong generationStatus
+            if (generationStatus?.questions) {
+                const updatedQuestions = generationStatus.questions.map(q =>
+                    q.id === variables.id ? { ...q, ...variables.updates, ai_review: { ...q.ai_review, status: 'approved' as const, reviewed: true } } : q
+                )
+                setGenerationStatus(prev => prev ? { ...prev, questions: updatedQuestions } : null)
+            }
+            queryClient.invalidateQueries({ queryKey: ['questions'] })
+            toast.success('Đã cập nhật câu hỏi!')
+            setIsEditModalOpen(false)
+            setEditingQuestion(null)
+        },
+        onError: (error: Error) => {
+            toast.error(`Lỗi: ${error.message}`)
+        },
+    })
 
     // Load documents
     const { data: docsData } = useQuery({
@@ -102,6 +130,15 @@ export default function Generate() {
 
         setGenerationStatus(null)
         generateMutation.mutate(config)
+    }
+
+    const handleEditQuestion = (question: Question) => {
+        setEditingQuestion(question)
+        setIsEditModalOpen(true)
+    }
+
+    const handleSaveQuestion = (questionId: string, updates: Partial<Question>) => {
+        updateMutation.mutate({ id: questionId, updates })
     }
 
     const isGenerating = generateMutation.isPending || isPolling
@@ -359,6 +396,7 @@ export default function Generate() {
                                         questionNumber={index + 1}
                                         mode="preview"
                                         showAnswer={true}
+                                        onEdit={handleEditQuestion}
                                     />
                                 ))}
 
@@ -392,6 +430,19 @@ export default function Generate() {
                     </div>
                 </div>
             </div>
+
+            {/* Edit Modal */}
+            {editingQuestion && (
+                <QuestionEditModal
+                    question={editingQuestion}
+                    isOpen={isEditModalOpen}
+                    onClose={() => {
+                        setIsEditModalOpen(false)
+                        setEditingQuestion(null)
+                    }}
+                    onSave={handleSaveQuestion}
+                />
+            )}
         </div>
     )
 }

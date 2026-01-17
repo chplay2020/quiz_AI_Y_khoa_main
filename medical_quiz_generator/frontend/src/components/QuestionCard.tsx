@@ -5,7 +5,8 @@ import {
     XCircleIcon,
     LightBulbIcon,
     ShieldCheckIcon,
-    ExclamationTriangleIcon
+    ExclamationTriangleIcon,
+    PencilIcon
 } from '@heroicons/react/24/solid'
 import clsx from 'clsx'
 
@@ -17,6 +18,7 @@ interface QuestionCardProps {
     onAnswerSelect?: (answerId: string) => void
     selectedAnswer?: string
     showAIReview?: boolean
+    onEdit?: (question: Question) => void
 }
 
 export default function QuestionCard({
@@ -27,6 +29,7 @@ export default function QuestionCard({
     onAnswerSelect,
     selectedAnswer,
     showAIReview = true,
+    onEdit,
 }: QuestionCardProps) {
     const [localShowAnswer, setLocalShowAnswer] = useState(showAnswer)
     const [localSelectedAnswer, setLocalSelectedAnswer] = useState<string | null>(selectedAnswer || null)
@@ -80,7 +83,8 @@ export default function QuestionCard({
     return (
         <div className="card">
             {/* Header */}
-            <div className="flex items-start justify-between mb-4">
+            <div className="flex items-center justify-between mb-4">
+                {/* Left: Question number, difficulty, topic */}
                 <div className="flex items-center space-x-3">
                     {questionNumber && (
                         <span className="flex items-center justify-center w-8 h-8 bg-primary-100 text-primary-700 rounded-full font-semibold text-sm">
@@ -96,11 +100,16 @@ export default function QuestionCard({
                         </span>
                     )}
                 </div>
+
+                {/* Center: Case-based badge */}
                 {question.question_type === 'case_based' && (
                     <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-medium">
                         Tình huống lâm sàng
                     </span>
                 )}
+
+                {/* Right: Empty placeholder for balance */}
+                <div className="w-8"></div>
             </div>
 
             {/* Question text */}
@@ -261,6 +270,24 @@ export default function QuestionCard({
                                     <li key={i}>{suggestion}</li>
                                 ))}
                             </ul>
+                        </div>
+                    )}
+
+                    {/* Edit button for needs_revision or reject */}
+                    {(question.ai_review.status === 'needs_revision' || question.ai_review.status === 'reject') && onEdit && (
+                        <div className="mt-3 pt-3 border-t border-gray-200">
+                            <button
+                                onClick={() => onEdit(question)}
+                                className={clsx(
+                                    'w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors',
+                                    question.ai_review.status === 'needs_revision'
+                                        ? 'bg-yellow-500 hover:bg-yellow-600 text-white'
+                                        : 'bg-red-500 hover:bg-red-600 text-white'
+                                )}
+                            >
+                                <PencilIcon className="w-4 h-4" />
+                                Sửa câu hỏi này
+                            </button>
                         </div>
                     )}
                 </div>

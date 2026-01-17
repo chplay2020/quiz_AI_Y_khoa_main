@@ -12,6 +12,7 @@ import clsx from 'clsx'
 import { questionsApi, Question } from '../api'
 import { useAppStore } from '../store'
 import QuestionCard from '../components/QuestionCard'
+import QuestionEditModal from '../components/QuestionEditModal'
 
 export default function Questions() {
     const [searchQuery, setSearchQuery] = useState('')
@@ -22,6 +23,7 @@ export default function Questions() {
     })
     const [showFilters, setShowFilters] = useState(false)
     const [editingQuestion, setEditingQuestion] = useState<Question | null>(null)
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false)
 
     const queryClient = useQueryClient()
     const { selectedQuestions, toggleQuestionSelection, clearQuestionSelection } = useAppStore()
@@ -46,8 +48,18 @@ export default function Questions() {
             queryClient.invalidateQueries({ queryKey: ['questions'] })
             toast.success('Đã cập nhật câu hỏi')
             setEditingQuestion(null)
+            setIsEditModalOpen(false)
         },
     })
+
+    const handleEditQuestion = (question: Question) => {
+        setEditingQuestion(question)
+        setIsEditModalOpen(true)
+    }
+
+    const handleSaveQuestion = (questionId: string, updates: Partial<Question>) => {
+        updateMutation.mutate({ id: questionId, updates })
+    }
 
     const questions: Question[] = data?.data?.questions || []
 
@@ -58,7 +70,7 @@ export default function Questions() {
         )
         : questions
 
-    const handleExport = async (format: 'json' | 'pdf' | 'excel') => {
+    const handleExport = async (format: 'json' | 'word' | 'pdf' | 'excel') => {
         if (selectedQuestions.length === 0) {
             toast.error('Vui lòng chọn ít nhất một câu hỏi để xuất')
             return
@@ -80,6 +92,29 @@ export default function Questions() {
                 a.click()
                 URL.revokeObjectURL(url)
                 toast.success('Đã xuất file JSON')
+            } else if (format === 'word') {
+                // Download Word file from base64
+                const fileContent = result.data.file_content
+                const filename = result.data.filename || `cau_hoi_trac_nghiem_${Date.now()}.docx`
+
+                // Decode base64 to blob
+                const byteCharacters = atob(fileContent)
+                const byteNumbers = new Array(byteCharacters.length)
+                for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i)
+                }
+                const byteArray = new Uint8Array(byteNumbers)
+                const blob = new Blob([byteArray], {
+                    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                })
+
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = filename
+                a.click()
+                URL.revokeObjectURL(url)
+                toast.success('Đã xuất file Word')
             }
         } catch (error) {
             toast.error('Không thể xuất file')
@@ -122,6 +157,14 @@ export default function Questions() {
                     >
                         <ArrowDownTrayIcon className="w-4 h-4 mr-2" />
                         Xuất JSON
+                    </button>
+                    <button
+                        onClick={() => handleExport('word')}
+                        className="btn-secondary flex items-center"
+                        disabled={selectedQuestions.length === 0}
+                    >
+                        <ArrowDownTrayIcon className="w-4 h-4 mr-2" />
+                        Xuất Word
                     </button>
                     <button
                         onClick={handleBulkDelete}
@@ -256,7 +299,7 @@ export default function Questions() {
                             {/* Actions */}
                             <div className="absolute top-6 right-6 z-10 flex gap-2">
                                 <button
-                                    onClick={() => setEditingQuestion(question)}
+                                    onClick={() => handleEditQuestion(question)}
                                     className="p-2 hover:bg-gray-100 rounded-lg"
                                     title="Chỉnh sửa"
                                 >
@@ -284,6 +327,7 @@ export default function Questions() {
                                     questionNumber={index + 1}
                                     mode="preview"
                                     showAnswer={true}
+                                    onEdit={handleEditQuestion}
                                 />
                             </div>
                         </div>
@@ -293,92 +337,15 @@ export default function Questions() {
 
             {/* Edit Modal */}
             {editingQuestion && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-white rounded-xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-6">
-                        <h2 className="text-xl font-bold text-gray-900 mb-4">Chỉnh sửa câu hỏi</h2>
-
-                        <div className="space-y-4">
-                            <div>
-                                <label className="label">Câu hỏi</label>
-                                <textarea
-                                    className="input"
-                                    rows={3}
-                                    value={editingQuestion.question_text}
-                                    onChange={(e) => setEditingQuestion({
-                                        ...editingQuestion,
-                                        question_text: e.target.value
-                                    })}
-                                />
-                            </div>
-
-                            <div>
-                                <label className="label">Giải thích</label>
-                                <textarea
-                                    className="input"
-                                    rows={3}
-                                    value={editingQuestion.explanation}
-                                    onChange={(e) => setEditingQuestion({
-                                        ...editingQuestion,
-                                        explanation: e.target.value
-                                    })}
-                                />
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="label">Độ khó</label>
-                                    <select
-                                        className="input"
-                                        value={editingQuestion.difficulty}
-                                        onChange={(e) => setEditingQuestion({
-                                            ...editingQuestion,
-                                            difficulty: e.target.value as any
-                                        })}
-                                    >
-                                        <option value="easy">Dễ</option>
-                                        <option value="medium">Trung bình</option>
-                                        <option value="hard">Khó</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label className="label">Chủ đề</label>
-                                    <input
-                                        type="text"
-                                        className="input"
-                                        value={editingQuestion.topic || ''}
-                                        onChange={(e) => setEditingQuestion({
-                                            ...editingQuestion,
-                                            topic: e.target.value
-                                        })}
-                                    />
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="flex justify-end gap-4 mt-6">
-                            <button
-                                onClick={() => setEditingQuestion(null)}
-                                className="btn-secondary"
-                            >
-                                Hủy
-                            </button>
-                            <button
-                                onClick={() => updateMutation.mutate({
-                                    id: editingQuestion.id,
-                                    updates: {
-                                        question_text: editingQuestion.question_text,
-                                        explanation: editingQuestion.explanation,
-                                        difficulty: editingQuestion.difficulty,
-                                        topic: editingQuestion.topic,
-                                    }
-                                })}
-                                className="btn-primary"
-                            >
-                                Lưu thay đổi
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <QuestionEditModal
+                    question={editingQuestion}
+                    isOpen={isEditModalOpen}
+                    onClose={() => {
+                        setIsEditModalOpen(false)
+                        setEditingQuestion(null)
+                    }}
+                    onSave={handleSaveQuestion}
+                />
             )}
         </div>
     )

@@ -190,7 +190,7 @@ export const questionsApi = {
         return response.data
     },
 
-    export: async (questionIds: string[], format: 'json' | 'pdf' | 'docx' | 'excel', options?: {
+    export: async (questionIds: string[], format: 'json' | 'pdf' | 'docx' | 'word' | 'excel', options?: {
         include_answers?: boolean
         include_explanations?: boolean
         shuffle_questions?: boolean
