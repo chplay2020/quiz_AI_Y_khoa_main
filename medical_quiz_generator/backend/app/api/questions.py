@@ -57,7 +57,8 @@ async def generate_questions_background(
             'topics': request.topics,
             'focus_areas': request.focus_areas,
             'language': 'vi',  # Luôn sử dụng tiếng Việt
-            'enable_double_check': getattr(request, 'enable_double_check', True)
+            'enable_double_check': getattr(request, 'enable_double_check', True),
+            'include_case_based': request.include_case_based  # Truyền vào để tính số lượng đúng
         })
         
         logger.info("Flow execution completed", task_id=task_id)
@@ -334,7 +335,7 @@ async def export_questions(request: ExportRequest):
     if not questions:
         raise HTTPException(status_code=404, detail="No questions found")
     
-    # For now, return JSON. In production, generate actual files
+    # JSON export
     if request.format == ExportFormat.JSON:
         return APIResponse(
             success=True,
@@ -345,7 +346,106 @@ async def export_questions(request: ExportRequest):
             }
         )
     
-    # TODO: Implement PDF, DOCX, Excel export
+    # WORD/DOCX export
+    if request.format in [ExportFormat.WORD, ExportFormat.DOCX]:
+        try:
+            from docx import Document
+            from docx.shared import Inches, Pt, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            import io
+            import base64
+            
+            doc = Document()
+            
+            # Title
+            title = doc.add_heading('BỘ CÂU HỎI TRẮC NGHIỆM Y KHOA', 0)
+            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            # Subtitle with count
+            subtitle = doc.add_paragraph(f'Tổng số: {len(questions)} câu hỏi')
+            subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            doc.add_paragraph()  # Empty line
+            
+            for i, q in enumerate(questions, 1):
+                # Question number and difficulty
+                difficulty_map = {'easy': 'Dễ', 'medium': 'Trung bình', 'hard': 'Khó'}
+                diff_text = difficulty_map.get(q.get('difficulty', 'medium'), 'Trung bình')
+                
+                q_header = doc.add_paragraph()
+                q_header_run = q_header.add_run(f'Câu {i}')
+                q_header_run.bold = True
+                q_header_run.font.size = Pt(12)
+                q_header.add_run(f' [{diff_text}]')
+                
+                # Topic if available
+                if q.get('topic'):
+                    q_header.add_run(f' - {q.get("topic")}')
+                
+                # Question text (đã chứa scenario nếu là câu lâm sàng)
+                q_text = q.get('question_text', '')
+                q_para = doc.add_paragraph()
+                q_para.add_run(q_text)
+                
+                # Options
+                for opt in q.get('options', []):
+                    opt_para = doc.add_paragraph()
+                    opt_text = f"    {opt.get('id', '')}. {opt.get('text', '')}"
+                    
+                    if request.include_answers and opt.get('is_correct'):
+                        opt_run = opt_para.add_run(opt_text + ' ✓')
+                        opt_run.bold = True
+                        opt_run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                    else:
+                        opt_para.add_run(opt_text)
+                
+                # Correct answer
+                if request.include_answers and q.get('correct_answer'):
+                    answer_para = doc.add_paragraph()
+                    answer_run = answer_para.add_run(f"➤ Đáp án đúng: {q.get('correct_answer')}")
+                    answer_run.bold = True
+                    answer_run.font.color.rgb = RGBColor(0, 100, 0)
+                
+                # Explanation
+                if request.include_explanations and q.get('explanation'):
+                    exp_para = doc.add_paragraph()
+                    exp_run = exp_para.add_run('💡 Giải thích: ')
+                    exp_run.bold = True
+                    exp_run.font.color.rgb = RGBColor(0, 0, 139)  # Dark blue
+                    exp_para.add_run(q.get('explanation', ''))
+                
+                # Add separator
+                doc.add_paragraph('─' * 50)
+            
+            # Save to bytes
+            file_stream = io.BytesIO()
+            doc.save(file_stream)
+            file_stream.seek(0)
+            
+            # Encode to base64
+            doc_base64 = base64.b64encode(file_stream.read()).decode('utf-8')
+            
+            return APIResponse(
+                success=True,
+                data={
+                    'file_content': doc_base64,
+                    'filename': 'cau_hoi_trac_nghiem.docx',
+                    'format': 'word',
+                    'mime_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'total': len(questions)
+                }
+            )
+            
+        except ImportError:
+            raise HTTPException(
+                status_code=501,
+                detail="python-docx library not installed. Run: pip install python-docx"
+            )
+        except Exception as e:
+            logger.error("Word export failed", error=str(e))
+            raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+    
+    # TODO: Implement PDF, Excel export
     raise HTTPException(
         status_code=501,
         detail=f"Export format {request.format} not yet implemented"

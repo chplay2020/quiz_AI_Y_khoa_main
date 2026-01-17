@@ -24,6 +24,7 @@ class ExportFormat(str, Enum):
     JSON = "json"
     PDF = "pdf"
     DOCX = "docx"
+    WORD = "word"
     EXCEL = "excel"
 
 

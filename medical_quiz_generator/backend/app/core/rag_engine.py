@@ -294,6 +294,7 @@ class RAGEngine:
     ) -> List[RetrievedContext]:
         """
         Retrieve diverse contexts for question generation.
+        BALANCED across all selected documents.
         
         Args:
             topics: Optional list of topics to focus on
@@ -305,7 +306,62 @@ class RAGEngine:
         """
         all_contexts = []
         
-        if topics:
+        # FIX: Lấy context đều từ mỗi document khi có nhiều document_ids
+        if document_ids and len(document_ids) > 1:
+            # Phân bổ đều contexts cho mỗi document
+            contexts_per_doc = max(2, num_contexts // len(document_ids))
+            extra_contexts = num_contexts % len(document_ids)
+            
+            logger.info(
+                "Balanced context retrieval for multiple documents",
+                num_documents=len(document_ids),
+                contexts_per_doc=contexts_per_doc,
+                extra_contexts=extra_contexts
+            )
+            
+            medical_queries = [
+                "chẩn đoán và điều trị",
+                "triệu chứng lâm sàng",
+                "xét nghiệm cận lâm sàng",
+                "phác đồ điều trị",
+                "biến chứng và tiên lượng"
+            ]
+            
+            for idx, doc_id in enumerate(document_ids):
+                # Thêm extra context cho các document đầu tiên
+                doc_num_contexts = contexts_per_doc + (1 if idx < extra_contexts else 0)
+                doc_contexts = []
+                
+                # Sử dụng topics nếu có, nếu không thì dùng medical_queries
+                queries_to_use = topics if topics else medical_queries
+                
+                for query in queries_to_use:
+                    query_contexts = await self.search(
+                        query=query,
+                        top_k=max(1, doc_num_contexts // len(queries_to_use) + 1),
+                        document_ids=[doc_id],  # Chỉ lấy từ document này
+                        threshold=0.2
+                    )
+                    doc_contexts.extend(query_contexts)
+                
+                # Loại bỏ duplicate trong document này và lấy đủ số lượng
+                seen_in_doc = set()
+                unique_doc_contexts = []
+                for ctx in doc_contexts:
+                    if ctx.chunk_id not in seen_in_doc:
+                        seen_in_doc.add(ctx.chunk_id)
+                        unique_doc_contexts.append(ctx)
+                
+                all_contexts.extend(unique_doc_contexts[:doc_num_contexts])
+                
+                logger.info(
+                    "Retrieved contexts from document",
+                    document_id=doc_id,
+                    requested=doc_num_contexts,
+                    retrieved=len(unique_doc_contexts[:doc_num_contexts])
+                )
+        
+        elif topics:
             # Search for each topic
             contexts_per_topic = max(2, num_contexts // len(topics))
             
@@ -318,7 +374,7 @@ class RAGEngine:
                 )
                 all_contexts.extend(topic_contexts)
         else:
-            # Get diverse sample by using medical keywords
+            # Get diverse sample by using medical keywords (single document case)
             medical_queries = [
                 "chẩn đoán và điều trị",
                 "triệu chứng lâm sàng",

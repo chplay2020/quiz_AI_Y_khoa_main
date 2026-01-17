@@ -285,62 +285,59 @@ class QuestionGenerationNode(BatchNode):
         difficulty = shared_state.get('difficulty', 'medium')
         question_types = shared_state.get('question_types', ['single_choice'])
         language = shared_state.get('language', 'vi')
-
-        # FIX 2: tạo buffer (đề phòng JSON lỗi / bị filter ở Validation) rồi sẽ cắt đúng target ở post/validation
-        buffer_target = target_questions + max(2, target_questions // 3)
+        include_case_based = shared_state.get('include_case_based', False)
+        
+        # FIX: Tính số câu hỏi thường = tổng - số câu lâm sàng (nếu có)
+        if include_case_based:
+            num_case_questions = max(2, target_questions // 3)  # 30% là câu lâm sàng
+            regular_target = target_questions - num_case_questions
+        else:
+            num_case_questions = 0
+            regular_target = target_questions
+        
+        # Lưu thông tin để các node khác sử dụng
+        shared_state['regular_target'] = regular_target
+        shared_state['case_target'] = num_case_questions
+        shared_state['question_target'] = target_questions
+        
+        # Tạo buffer cho câu hỏi thường (đề phòng JSON lỗi / bị filter)
+        buffer_target = regular_target + max(1, regular_target // 4)
 
         if not contexts:
             return []
 
-        # Dùng tối đa `buffer_target` contexts (mỗi context thường tạo 1 câu), nếu thiếu context thì phân bổ nhiều câu/context
+        # Dùng tối đa `buffer_target` contexts
         num_contexts_to_use = min(len(contexts), buffer_target)
         selected_contexts = contexts[:num_contexts_to_use]
 
-        base = buffer_target // num_contexts_to_use
-        remainder = buffer_target % num_contexts_to_use
-
         logger.info(
             "Question generation strategy",
+            total_target=target_questions,
+            regular_target=regular_target,
+            case_target=num_case_questions,
+            buffer_target=buffer_target,
+            include_case_based=include_case_based,
             total_contexts_available=len(contexts),
             num_contexts_to_use=num_contexts_to_use,
-            target_questions=target_questions,
-            buffer_target=buffer_target,
-            base_per_context=base,
-            remainder=remainder,
             language=language
         )
 
-        # items: List[Dict[str, Any]] = []
-        # for i, ctx in enumerate(selected_contexts):
-        #     n_q = base + (1 if i < remainder else 0)
-        #     if n_q <= 0:
-        #         continue
-        #     items.append({
-        #         'context': ctx,
-        #         'difficulty': difficulty,
-        #         'question_types': question_types,
-        #         'language': language,
-        #         'num_questions': n_q,
-        #     })
-
-        # ===== FIX 4: GỘP CONTEXT THÀNH 1 PROMPT =====
+        # ===== GỘP CONTEXT THÀNH 1 PROMPT =====
         combined_context = "\n\n".join(
             f"[CONTEXT {i+1}]\n{ctx.content[:500]}"
             for i, ctx in enumerate(selected_contexts)
         )
 
         items = [{
-            'context': combined_context,   # ⚠️ STRING, KHÔNG PHẢI ctx
-            'original_contexts': selected_contexts,  # Store originals for metadata
+            'context': combined_context,
+            'original_contexts': selected_contexts,
             'difficulty': difficulty,
             'question_types': question_types,
             'language': language,
             'num_questions': buffer_target,
         }]
 
-
         shared_state['unused_contexts'] = contexts[num_contexts_to_use:]
-        shared_state['question_target'] = target_questions
         shared_state['question_buffer_target'] = buffer_target
 
         return items
@@ -382,14 +379,37 @@ class QuestionGenerationNode(BatchNode):
             if not isinstance(result, dict):
                 return {'questions': [], 'error': 'Invalid response format'}
             
-            # Add context reference (use first original context for metadata)
+            # Add context reference - distribute document_ids across questions
             original_contexts = item.get('original_contexts', [])
             if 'questions' in result and original_contexts:
-                first_ctx = original_contexts[0]
-                for q in result['questions']:
-                    q['source_chunk_id'] = getattr(first_ctx, 'chunk_id', 'combined')
-                    q['document_id'] = getattr(first_ctx, 'document_id', 'unknown')
-                    q['reference_text'] = context[:500] if isinstance(context, str) else str(context)[:500]
+                # Tạo map document_id -> contexts
+                doc_contexts_map = {}
+                for ctx in original_contexts:
+                    doc_id = getattr(ctx, 'document_id', 'unknown')
+                    if doc_id not in doc_contexts_map:
+                        doc_contexts_map[doc_id] = []
+                    doc_contexts_map[doc_id].append(ctx)
+                
+                doc_ids = list(doc_contexts_map.keys())
+                num_questions = len(result['questions'])
+                
+                # Phân bổ câu hỏi đều cho các document
+                for i, q in enumerate(result['questions']):
+                    # Round-robin assignment để đảm bảo đều các document
+                    assigned_doc_id = doc_ids[i % len(doc_ids)] if doc_ids else 'unknown'
+                    assigned_contexts = doc_contexts_map.get(assigned_doc_id, original_contexts)
+                    assigned_ctx = assigned_contexts[0] if assigned_contexts else original_contexts[0]
+                    
+                    q['source_chunk_id'] = getattr(assigned_ctx, 'chunk_id', 'combined')
+                    q['document_id'] = assigned_doc_id
+                    q['reference_text'] = getattr(assigned_ctx, 'content', '')[:500]
+                    
+                logger.info(
+                    "Questions assigned to documents",
+                    num_questions=num_questions,
+                    num_documents=len(doc_ids),
+                    doc_ids=doc_ids
+                )
             
             return result
             
@@ -427,20 +447,20 @@ class QuestionGenerationNode(BatchNode):
         # logger.info("Total questions generated", total=len(all_questions))
 
         # =========================
-        # FIX 4: CẮT ĐÚNG SỐ LƯỢNG CÂU HỎI CUỐI
+        # CẮT ĐÚNG SỐ LƯỢNG CÂU HỎI THƯỜNG
         # =========================
-        target = int(shared_state.get("question_target", len(all_questions)))
+        regular_target = int(shared_state.get("regular_target", len(all_questions)))
 
-        if len(all_questions) > target:
-            all_questions = all_questions[:target]
+        if len(all_questions) > regular_target:
+            all_questions = all_questions[:regular_target]
 
         shared_state["generated_questions"] = all_questions
         shared_state["generated_count"] = len(all_questions)
-        shared_state["missing_questions"] = max(0, target - len(all_questions))
+        shared_state["missing_questions"] = max(0, regular_target - len(all_questions))
 
         logger.info(
-            "Question count finalized",
-            target=target,
+            "Regular questions finalized",
+            regular_target=regular_target,
             generated=len(all_questions),
             missing=shared_state["missing_questions"]
         )
@@ -532,10 +552,25 @@ class CaseBasedQuestionNode(BaseNode):
     
     async def prep(self, shared_state: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare for case-based question generation"""
+        # Lấy số câu lâm sàng đã tính từ QuestionGenerationNode
+        num_case_questions = shared_state.get('case_target', 0)
+        
+        # Fallback nếu không có
+        if num_case_questions == 0:
+            target_questions = shared_state.get('question_target', shared_state.get('num_questions', 10))
+            num_case_questions = max(2, target_questions // 3)
+        
+        logger.info(
+            "Preparing case-based questions",
+            num_case_questions=num_case_questions,
+            total_target=shared_state.get('question_target')
+        )
+        
         return {
             'contexts': shared_state.get('retrieved_contexts', []),
             'language': shared_state.get('language', 'vi'),
-            'num_cases': shared_state.get('num_case_questions', 2)
+            'num_cases': num_case_questions,
+            'difficulty': shared_state.get('difficulty', 'medium')
         }
     
     async def exec(self, prep_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -543,21 +578,26 @@ class CaseBasedQuestionNode(BaseNode):
         contexts = prep_result['contexts']
         language = prep_result['language']
         num_cases = prep_result['num_cases']
+        difficulty = prep_result.get('difficulty', 'medium')
         
         if not contexts:
+            logger.warning("No contexts available for case-based questions")
             return []
         
         # Combine multiple contexts for richer case scenarios
-        combined_context = "\n\n".join([ctx.content for ctx in contexts[:5]])
+        combined_context = "\n\n".join([ctx.content[:600] for ctx in contexts[:8]])
         
-        prompt = self._build_case_prompt(combined_context, language, num_cases)
+        prompt = self._build_case_prompt(combined_context, language, num_cases, difficulty)
         
         try:
+            await asyncio.sleep(20)  # Rate limit delay
             result = await self.llm.generate_structured(
                 prompt=prompt,
                 system_prompt=self._get_system_prompt(language),
                 temperature=0.5
             )
+            
+            logger.info("Case-based LLM response received", result_type=type(result).__name__)
             
             # Handle case where result is a string instead of dict
             if isinstance(result, str):
@@ -565,55 +605,132 @@ class CaseBasedQuestionNode(BaseNode):
                 try:
                     result = json.loads(result)
                 except json.JSONDecodeError:
-                    logger.error("Failed to parse case-based response as JSON")
+                    logger.error("Failed to parse case-based response as JSON", response=result[:300])
                     return []
             
             if not isinstance(result, dict):
+                logger.error("Invalid result type for case-based", result_type=type(result).__name__)
                 return []
-                
-            return result.get('cases', [])
+            
+            cases = result.get('cases', [])
+            logger.info("Case-based questions parsed", num_cases=len(cases))
+            return cases
+            
         except Exception as e:
             logger.error("Case-based question generation failed", error=str(e))
             return []
     
     async def post(self, shared_state: Dict[str, Any], prep_result: Any, exec_result: List[Dict[str, Any]]) -> str:
-        """Store case-based questions"""
+        """Store case-based questions with scenario merged into question_text"""
         existing_questions = shared_state.get('generated_questions', [])
+        contexts = prep_result.get('contexts', [])
+        case_questions_added = 0
+        case_target = shared_state.get('case_target', prep_result.get('num_cases', 2))
         
         # Convert cases to question format
         for case in exec_result:
+            scenario = case.get('scenario', '')
+            
             if 'questions' in case:
                 for q in case['questions']:
+                    # ===== FIX: GHÉP SCENARIO VÀO QUESTION_TEXT =====
+                    original_question = q.get('question_text', '')
+                    if scenario:
+                        # Ghép tình huống lâm sàng vào đầu câu hỏi
+                        q['question_text'] = f"📋 TÌNH HUỐNG LÂM SÀNG:\n{scenario}\n\n❓ CÂU HỎI:\n{original_question}"
+                    
                     q['question_type'] = 'case_based'
-                    q['case_scenario'] = case.get('scenario', '')
-                existing_questions.extend(case['questions'])
+                    q['case_scenario'] = scenario  # Giữ lại scenario riêng để reference
+                    q['is_clinical'] = True
+                    
+                    # Thêm metadata
+                    if contexts:
+                        q['source_chunk_id'] = getattr(contexts[0], 'chunk_id', 'case_based')
+                        q['document_id'] = getattr(contexts[0], 'document_id', 'unknown')
+                    
+                    # Đảm bảo có đủ các trường cần thiết
+                    if 'difficulty' not in q:
+                        q['difficulty'] = prep_result.get('difficulty', 'medium')
+                    if 'topic' not in q:
+                        q['topic'] = 'Tình huống lâm sàng'
+                    if 'keywords' not in q:
+                        q['keywords'] = ['lâm sàng', 'tình huống', 'bệnh nhân']
+                    
+                    existing_questions.append(q)
+                    case_questions_added += 1
+                    
+                    # Dừng nếu đã đủ số câu lâm sàng cần thiết
+                    if case_questions_added >= case_target:
+                        break
+            
+            if case_questions_added >= case_target:
+                break
         
         shared_state['generated_questions'] = existing_questions
+        shared_state['case_questions_count'] = case_questions_added
+        
+        # Log tổng kết
+        total_questions = len(existing_questions)
+        question_target = shared_state.get('question_target', total_questions)
+        
+        logger.info(
+            "Case-based questions added - FINAL COUNT",
+            case_questions_added=case_questions_added,
+            case_target=case_target,
+            total_questions=total_questions,
+            question_target=question_target,
+            match=(total_questions == question_target)
+        )
         
         return "default"
     
     def _get_system_prompt(self, language: str) -> str:
         return """Bạn là một bác sĩ lâm sàng giàu kinh nghiệm. Hãy tạo các tình huống lâm sàng thực tế 
 với các câu hỏi trắc nghiệm liên quan. Các tình huống phải giống như gặp trong thực hành lâm sàng.
-TẤT CẢ NỘI DUNG PHẢI BẰNG TIẾNG VIỆT."""
-    
-    def _build_case_prompt(self, context: str, language: str, num_cases: int) -> str:
-        return f"""Dựa trên kiến thức y khoa sau, tạo {num_cases} tình huống lâm sàng với câu hỏi.
 
-KIẾN THỨC:
+⚠️ QUY ĐỊNH BẮT BUỘC:
+- BẮT BUỘC sử dụng TIẾNG VIỆT cho tất cả nội dung
+- KHÔNG dùng tiếng Anh
+- Mỗi tình huống phải có đầy đủ: tuổi, giới tính, triệu chứng, tiền sử
+- Câu hỏi phải liên quan trực tiếp đến tình huống
+
+Chỉ trả về JSON thuần, không markdown, không ```."""
+    
+    def _build_case_prompt(self, context: str, language: str, num_cases: int, difficulty: str) -> str:
+        difficulty_desc = {
+            'easy': 'đơn giản, triệu chứng điển hình',
+            'medium': 'trung bình, cần phân tích',
+            'hard': 'phức tạp, nhiều yếu tố gây nhiễu'
+        }
+        
+        return f"""Dựa trên kiến thức y khoa sau, tạo CHÍNH XÁC {num_cases} tình huống lâm sàng với câu hỏi.
+
+KIẾN THỨC THAM KHẢO:
 {context}
 
-Trả về JSON:
+YÊU CẦU:
+- Tạo đúng {num_cases} tình huống lâm sàng khác nhau
+- Độ khó: {difficulty_desc.get(difficulty, 'trung bình')}
+- Mỗi tình huống có 1-2 câu hỏi trắc nghiệm
+- Tình huống phải thực tế, chi tiết (tuổi, giới, triệu chứng cụ thể)
+- TẤT CẢ bằng TIẾNG VIỆT
+
+Trả về JSON theo format sau (KHÔNG dùng markdown):
 {{
     "cases": [
         {{
-            "scenario": "Mô tả bệnh nhân: tuổi, giới, lý do đến khám, triệu chứng...",
+            "scenario": "Bệnh nhân nam 45 tuổi, vào viện vì đau ngực trái 2 giờ...",
             "questions": [
                 {{
-                    "question_text": "Câu hỏi về chẩn đoán/điều trị...",
-                    "options": [...],
+                    "question_text": "Chẩn đoán phù hợp nhất với bệnh nhân này là gì?",
+                    "options": [
+                        {{"id": "A", "text": "Nhồi máu cơ tim cấp", "is_correct": true}},
+                        {{"id": "B", "text": "Viêm màng ngoài tim", "is_correct": false}},
+                        {{"id": "C", "text": "Thuyên tắc phổi", "is_correct": false}},
+                        {{"id": "D", "text": "Viêm phổi", "is_correct": false}}
+                    ],
                     "correct_answer": "A",
-                    "explanation": "..."
+                    "explanation": "Giải thích chi tiết tại sao A là đáp án đúng..."
                 }}
             ]
         }}
@@ -826,29 +943,29 @@ class AIDoubleCheckNode(BaseNode):
                 for j, opt in enumerate(q.get('options', []), 1)
             ])
             questions_text += f"""
-Question {i}:
+Câu hỏi {i}:
 {q.get('question_text', '')}
-Options:
+Đáp án:
 {options_text}
-Correct Answer: {q.get('correct_answer', '')}
-Explanation: {q.get('explanation', 'N/A')}
+Đáp án đúng: {q.get('correct_answer', '')}
+Giải thích: {q.get('explanation', 'Không có')}
 ---
 """
         
-        return f"""You are a medical education expert reviewing quiz questions for accuracy and quality.
+        return f"""Bạn là chuyên gia giáo dục y khoa, đang kiểm tra chất lượng câu hỏi trắc nghiệm.
 
-Review each question below and provide:
-1. Accuracy Score (1-10): Is the medical information correct?
-2. Clarity Score (1-10): Is the question clear and unambiguous?
-3. Educational Value (1-10): Does it test important medical knowledge?
-4. Issues: List any problems found (incorrect info, ambiguous wording, etc.)
-5. Suggestions: How to improve the question
-6. Verdict: APPROVED, NEEDS_REVISION, or REJECT
+Hãy đánh giá từng câu hỏi dưới đây và cung cấp:
+1. Điểm chính xác (1-10): Thông tin y khoa có chính xác không?
+2. Điểm rõ ràng (1-10): Câu hỏi có rõ ràng, không mơ hồ không?
+3. Giá trị giáo dục (1-10): Câu hỏi có kiểm tra kiến thức y khoa quan trọng không?
+4. Vấn đề: Liệt kê các vấn đề phát hiện (đáp án sai, câu hỏi mơ hồ, v.v.)
+5. Gợi ý: Cách cải thiện câu hỏi
+6. Kết luận: ĐẠT, CẦN_SỬa, hoặc KHÔNG_ĐẠT
 
-Questions to review:
+Các câu hỏi cần kiểm tra:
 {questions_text}
 
-Respond in JSON format:
+Trả lời theo định dạng JSON (BẮT BUỘC dùng tiếng Việt cho issues và suggestions):
 {{
     "reviews": [
         {{
@@ -856,20 +973,21 @@ Respond in JSON format:
             "accuracy_score": 8,
             "clarity_score": 9,
             "educational_value": 7,
-            "issues": ["Minor issue description"],
-            "suggestions": ["Suggestion to improve"],
-            "verdict": "APPROVED",
+            "issues": ["Mô tả vấn đề bằng tiếng Việt"],
+            "suggestions": ["Gợi ý cải thiện bằng tiếng Việt"],
+            "verdict": "ĐẠT",
             "corrected_answer": null,
             "corrected_explanation": null
         }}
     ]
 }}
 
-Important:
-- Be strict about medical accuracy
-- Flag any potentially dangerous misinformation
-- If the correct answer is wrong, provide the corrected answer
-- Vietnamese medical terminology should be accurate"""
+Lưu ý quan trọng:
+- Nghiêm khắc về độ chính xác y khoa
+- Đánh dấu thông tin sai có thể gây nguy hiểm
+- Nếu đáp án sai, cung cấp đáp án đúng
+- Thuật ngữ y khoa tiếng Việt phải chính xác
+- TẤT CẢ nội dung issues và suggestions phải bằng TIẾNG VIỆT"""
     
     def _parse_review_response(self, response: str) -> List[Dict[str, Any]]:
         """Parse AI review response"""
@@ -878,6 +996,21 @@ Important:
         
         reviews = []
         
+        # Map Vietnamese verdicts to English status
+        verdict_map = {
+            'đạt': 'approved',
+            'dat': 'approved',
+            'approved': 'approved',
+            'cần_sửa': 'needs_revision',
+            'can_sua': 'needs_revision',
+            'cần sửa': 'needs_revision',
+            'needs_revision': 'needs_revision',
+            'không_đạt': 'reject',
+            'khong_dat': 'reject',
+            'không đạt': 'reject',
+            'reject': 'reject'
+        }
+        
         try:
             # Extract JSON from response
             json_match = re.search(r'\{[\s\S]*\}', response)
@@ -885,8 +1018,11 @@ Important:
                 data = json.loads(json_match.group())
                 
                 for review in data.get('reviews', []):
+                    verdict = review.get('verdict', 'ĐẠT').lower().strip()
+                    status = verdict_map.get(verdict, 'approved')
+                    
                     reviews.append({
-                        'status': review.get('verdict', 'APPROVED').lower(),
+                        'status': status,
                         'accuracy_score': review.get('accuracy_score'),
                         'clarity_score': review.get('clarity_score'),
                         'educational_value': review.get('educational_value'),
