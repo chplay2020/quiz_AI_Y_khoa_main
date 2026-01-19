@@ -4,8 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import {
     SparklesIcon,
     DocumentTextIcon,
-    AdjustmentsHorizontalIcon,
-    ShieldCheckIcon
+    AdjustmentsHorizontalIcon
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
@@ -25,7 +24,7 @@ export default function Generate() {
         difficulty: 'medium',
         include_case_based: false,
         include_explanations: true,
-        enable_double_check: true, // AI double-check enabled by default
+
     })
 
     const [generationStatus, setGenerationStatus] = useState<GenerationStatus | null>(null)
@@ -280,29 +279,6 @@ export default function Generate() {
                                 <label htmlFor="explanations" className="text-sm text-gray-700">
                                     Bao gồm giải thích đáp án
                                 </label>
-                            </div>
-
-                            {/* AI Double Check Option */}
-                            <div className="flex items-center p-3 bg-blue-50 rounded-lg border border-blue-200">
-                                <input
-                                    type="checkbox"
-                                    id="double_check"
-                                    className="rounded border-blue-300 text-blue-600 mr-2"
-                                    checked={config.enable_double_check}
-                                    onChange={(e) => setConfig(prev => ({
-                                        ...prev,
-                                        enable_double_check: e.target.checked
-                                    }))}
-                                />
-                                <div className="flex-1">
-                                    <label htmlFor="double_check" className="text-sm font-medium text-blue-900 flex items-center">
-                                        <ShieldCheckIcon className="w-4 h-4 mr-1" />
-                                        AI Double-Check
-                                    </label>
-                                    <p className="text-xs text-blue-700 mt-0.5">
-                                        AI kiểm tra lại độ chính xác y khoa của câu hỏi
-                                    </p>
-                                </div>
                             </div>
                         </div>
                     </div>
