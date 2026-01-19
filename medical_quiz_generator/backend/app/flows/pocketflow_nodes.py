@@ -219,42 +219,7 @@ class ContextRetrievalNode(BaseNode):
     
     async def post(self, shared_state: Dict[str, Any], prep_result: Any, exec_result: List[RetrievedContext]) -> str:
         """Store retrieved contexts (and optionally filter by output language)."""
-        # language = shared_state.get('language', 'vi')
-        # contexts = exec_result or []
-
-        # # FIX 1: lọc chunk nhiễu/watermark và (tuỳ chọn) giữ đúng ngôn ngữ yêu cầu
-        # if language == 'vi':
-        #     import re
-
-        #     def _looks_vietnamese(s: str) -> bool:
-        #         if not s:
-        #             return False
-        #         if re.search(r"[À-ỹ]", s):
-        #             return True
-        #         s2 = f" {s.lower()} "
-        #         hits = sum(w in s2 for w in [" và ", " của ", " không ", " được ", " bệnh ", " điều trị ", " cấp cứu "])
-        #         return hits >= 2
-
-        #     filtered: List[RetrievedContext] = []
-        #     for c in contexts:
-        #         txt = getattr(c, 'content', '') or ''
-        #         txt_wo_mark = re.sub(r"(?i)\byhocdata\.com\b", " ", txt).strip()
-        #         if len(txt_wo_mark) < 80:
-        #             continue
-        #         if _looks_vietnamese(txt_wo_mark):
-        #             filtered.append(c)
-
-        #     if filtered:
-        #         contexts = filtered
-
-        # shared_state['retrieved_contexts'] = contexts
-        # logger.info("Contexts retrieved", count=len(contexts))
-
-        # if len(contexts) == 0:
-        #     return "no_contexts"
-
-        # return "default"
-
+        
         shared_state["retrieved_contexts"] = exec_result
 
         logger.warning(
@@ -306,38 +271,79 @@ class QuestionGenerationNode(BatchNode):
         if not contexts:
             return []
 
-        # Dùng tối đa `buffer_target` contexts
-        num_contexts_to_use = min(len(contexts), buffer_target)
-        selected_contexts = contexts[:num_contexts_to_use]
-
+        # ===== FIX: CHIA CONTEXTS THEO DOCUMENT_ID =====
+        # Nhóm contexts theo document_id
+        doc_contexts_map = {}
+        for ctx in contexts:
+            doc_id = getattr(ctx, 'document_id', 'unknown')
+            if doc_id not in doc_contexts_map:
+                doc_contexts_map[doc_id] = []
+            doc_contexts_map[doc_id].append(ctx)
+        
+        doc_ids = list(doc_contexts_map.keys())
+        num_documents = len(doc_ids)
+        
+        if num_documents == 0:
+            return []
+        
+        # Phân bổ số câu hỏi cho mỗi document
+        questions_per_doc = buffer_target // num_documents
+        extra_questions = buffer_target % num_documents
+        
         logger.info(
-            "Question generation strategy",
+            "Question generation strategy - Multi-document",
             total_target=target_questions,
             regular_target=regular_target,
             case_target=num_case_questions,
             buffer_target=buffer_target,
+            num_documents=num_documents,
+            questions_per_doc=questions_per_doc,
+            extra_questions=extra_questions,
             include_case_based=include_case_based,
-            total_contexts_available=len(contexts),
-            num_contexts_to_use=num_contexts_to_use,
             language=language
         )
 
-        # ===== GỘP CONTEXT THÀNH 1 PROMPT =====
-        combined_context = "\n\n".join(
-            f"[CONTEXT {i+1}]\n{ctx.content[:500]}"
-            for i, ctx in enumerate(selected_contexts)
-        )
+        # Tạo items cho mỗi document
+        items = []
+        unused_contexts = []
+        
+        for idx, doc_id in enumerate(doc_ids):
+            doc_contexts = doc_contexts_map[doc_id]
+            
+            # Document đầu tiên nhận thêm extra questions
+            num_questions_for_doc = questions_per_doc + (extra_questions if idx == 0 else 0)
+            
+            # Lấy contexts cho document này
+            num_contexts_for_doc = min(len(doc_contexts), num_questions_for_doc)
+            selected_doc_contexts = doc_contexts[:num_contexts_for_doc]
+            
+            # Gộp contexts của document này
+            combined_context = "\n\n".join(
+                f"[CONTEXT {i+1}]\n{ctx.content[:500]}"
+                for i, ctx in enumerate(selected_doc_contexts)
+            )
+            
+            items.append({
+                'context': combined_context,
+                'original_contexts': selected_doc_contexts,
+                'difficulty': difficulty,
+                'question_types': question_types,
+                'language': language,
+                'num_questions': num_questions_for_doc,
+                'document_id': doc_id  # Đánh dấu document này
+            })
+            
+            # Lưu unused contexts
+            unused_contexts.extend(doc_contexts[num_contexts_for_doc:])
+            
+            logger.info(
+                f"Prepared contexts for document {idx+1}/{num_documents}",
+                document_id=doc_id,
+                num_contexts=num_contexts_for_doc,
+                num_questions_target=num_questions_for_doc
+            )
 
-        items = [{
-            'context': combined_context,
-            'original_contexts': selected_contexts,
-            'difficulty': difficulty,
-            'question_types': question_types,
-            'language': language,
-            'num_questions': buffer_target,
-        }]
-
-        shared_state['unused_contexts'] = contexts[num_contexts_to_use:]
+        shared_state['unused_contexts'] = unused_contexts
         shared_state['question_buffer_target'] = buffer_target
 
         return items
@@ -379,36 +385,25 @@ class QuestionGenerationNode(BatchNode):
             if not isinstance(result, dict):
                 return {'questions': [], 'error': 'Invalid response format'}
             
-            # Add context reference - distribute document_ids across questions
+            # Add context reference - use the assigned document_id from prep
             original_contexts = item.get('original_contexts', [])
+            assigned_doc_id = item.get('document_id', 'unknown')  # Lấy document_id đã được assign
+            
             if 'questions' in result and original_contexts:
-                # Tạo map document_id -> contexts
-                doc_contexts_map = {}
-                for ctx in original_contexts:
-                    doc_id = getattr(ctx, 'document_id', 'unknown')
-                    if doc_id not in doc_contexts_map:
-                        doc_contexts_map[doc_id] = []
-                    doc_contexts_map[doc_id].append(ctx)
-                
-                doc_ids = list(doc_contexts_map.keys())
-                num_questions = len(result['questions'])
-                
-                # Phân bổ câu hỏi đều cho các document
-                for i, q in enumerate(result['questions']):
-                    # Round-robin assignment để đảm bảo đều các document
-                    assigned_doc_id = doc_ids[i % len(doc_ids)] if doc_ids else 'unknown'
-                    assigned_contexts = doc_contexts_map.get(assigned_doc_id, original_contexts)
-                    assigned_ctx = assigned_contexts[0] if assigned_contexts else original_contexts[0]
+                # Tất cả câu hỏi trong batch này đều thuộc document_id này
+                for q in result['questions']:
+                    # Lấy ngẫu nhiên 1 context từ document này để làm reference
+                    import random
+                    assigned_ctx = random.choice(original_contexts)
                     
                     q['source_chunk_id'] = getattr(assigned_ctx, 'chunk_id', 'combined')
-                    q['document_id'] = assigned_doc_id
+                    q['document_id'] = assigned_doc_id  # Dùng doc_id đã được assign
                     q['reference_text'] = getattr(assigned_ctx, 'content', '')[:500]
-                    
+                
                 logger.info(
-                    "Questions assigned to documents",
-                    num_questions=num_questions,
-                    num_documents=len(doc_ids),
-                    doc_ids=doc_ids
+                    "Questions assigned to document",
+                    num_questions=len(result['questions']),
+                    document_id=assigned_doc_id
                 )
             
             return result
