@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -29,6 +29,9 @@ export default function Generate() {
 
     const [generationStatus, setGenerationStatus] = useState<GenerationStatus | null>(null)
     const [isPolling, setIsPolling] = useState(false)
+
+    // Sử dụng useRef để tránh tạo nhiều intervals
+    const hasShownToastRef = useRef(false)
 
     // Edit modal state
     const [editingQuestion, setEditingQuestion] = useState<Question | null>(null)
@@ -70,6 +73,7 @@ export default function Generate() {
         onSuccess: (data) => {
             setCurrentTaskId(data.task_id)
             setIsPolling(true)
+            hasShownToastRef.current = false  // Reset ref khi bắt đầu tạo mới
             toast.success('Đang tạo câu hỏi...')
         },
         onError: (error: Error) => {
@@ -94,15 +98,21 @@ export default function Generate() {
 
 
                     if (status.status === 'completed' || status.status === 'failed') {
-                        clearInterval(interval)      // 🔥 DÒNG QUAN TRỌNG
+                        clearInterval(interval)
                         setIsPolling(false)
-                        if (status.status === 'completed') {
-                            const reviewMsg = status.review_stats
-                                ? ` (${status.review_stats.high_accuracy} câu đạt chuẩn)`
-                                : ''
-                            toast.success(`Đã tạo ${status.generated_questions} câu hỏi!${reviewMsg}`)
-                        } else {
-                            toast.error(`Lỗi: ${status.error}`)
+
+                        // Chỉ hiển thị toast 1 lần duy nhất sử dụng ref
+                        if (!hasShownToastRef.current) {
+                            hasShownToastRef.current = true
+
+                            if (status.status === 'completed') {
+                                const reviewMsg = status.review_stats
+                                    ? ` (${status.review_stats.high_accuracy} câu đạt chuẩn)`
+                                    : ''
+                                toast.success(`Đã tạo ${status.generated_questions} câu hỏi!${reviewMsg}`)
+                            } else {
+                                toast.error(`Lỗi: ${status.error}`)
+                            }
                         }
                     }
                 } catch (error) {
@@ -128,6 +138,7 @@ export default function Generate() {
         }
 
         setGenerationStatus(null)
+        hasShownToastRef.current = false  // Reset ref khi submit lại
         generateMutation.mutate(config)
     }
 

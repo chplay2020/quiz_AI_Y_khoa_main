@@ -66,15 +66,27 @@ async def generate_questions_background(
         logger.info("Flow execution completed", task_id=task_id)
 
         
-        # ✅ FIX TREO TASK KHI KHÔNG CÓ CONTEXT
-        if not result.get("retrieved_contexts"):
-            logger.error("NO CONTEXT RETRIEVED – END TASK EARLY", task_id=task_id)
-            generation_tasks[task_id]["status"] = "completed"
+        # ✅ FIX: Check for flow failure status (fail-fast from NoContextErrorNode)
+        if result.get("status") == "failed":
+            error_msg = result.get("error", "Không tìm thấy nội dung hợp lệ trong tài liệu")
+            logger.error("Flow failed - no valid context", task_id=task_id, error=error_msg)
+            generation_tasks[task_id]["status"] = "failed"
             generation_tasks[task_id]["questions"] = []
             generation_tasks[task_id]["total_questions"] = 0
             generation_tasks[task_id]["generated_questions"] = 0
             generation_tasks[task_id]["progress"] = 1.0
-            generation_tasks[task_id]["error"] = "No context retrieved from documents"
+            generation_tasks[task_id]["error"] = error_msg
+            return
+
+        # ✅ FIX TREO TASK KHI KHÔNG CÓ CONTEXT
+        if not result.get("retrieved_contexts"):
+            logger.error("NO CONTEXT RETRIEVED – END TASK EARLY", task_id=task_id)
+            generation_tasks[task_id]["status"] = "failed"
+            generation_tasks[task_id]["questions"] = []
+            generation_tasks[task_id]["total_questions"] = 0
+            generation_tasks[task_id]["generated_questions"] = 0
+            generation_tasks[task_id]["progress"] = 1.0
+            generation_tasks[task_id]["error"] = "Không tìm thấy nội dung y khoa hợp lệ. Tài liệu có thể chỉ chứa watermark hoặc là file scan chất lượng thấp."
             return
         
         # Debug log
