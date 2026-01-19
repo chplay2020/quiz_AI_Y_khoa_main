@@ -443,29 +443,72 @@ class QuestionGenerationNode(BatchNode):
                     questions_value=str(questions)[:200]
                 )
         
-        # shared_state['generated_questions'] = all_questions
-        # logger.info("Total questions generated", total=len(all_questions))
-
+        regular_target = int(shared_state.get("regular_target", shared_state.get("num_questions", 10)))
+        
+        # =========================
+        # RETRY NẾU KHÔNG ĐỦ CÂU HỎI
+        # =========================
+        retry_count = shared_state.get('_retry_count', 0)
+        max_retries = 2
+        
+        if len(all_questions) < regular_target and retry_count < max_retries:
+            missing = regular_target - len(all_questions)
+            logger.warning(
+                "Not enough questions generated, will retry",
+                generated=len(all_questions),
+                target=regular_target,
+                missing=missing,
+                retry_count=retry_count
+            )
+            
+            # Lưu câu hỏi đã có và retry
+            shared_state['_partial_questions'] = shared_state.get('_partial_questions', []) + all_questions
+            shared_state['_retry_count'] = retry_count + 1
+            shared_state['num_questions'] = missing + 2  # Thêm buffer
+            shared_state['regular_target'] = missing + 2
+            
+            # Dùng unused contexts nếu có
+            unused = shared_state.get('unused_contexts', [])
+            if unused:
+                shared_state['retrieved_contexts'] = unused
+                shared_state['unused_contexts'] = []
+            
+            return "retry"  # Signal to retry
+        
+        # Gộp với câu hỏi từ retry trước
+        partial = shared_state.get('_partial_questions', [])
+        if partial:
+            all_questions = partial + all_questions
+            # Clear partial
+            shared_state.pop('_partial_questions', None)
+            shared_state.pop('_retry_count', None)
+        
         # =========================
         # CẮT ĐÚNG SỐ LƯỢNG CÂU HỎI THƯỜNG
         # =========================
-        regular_target = int(shared_state.get("regular_target", len(all_questions)))
+        question_target = int(shared_state.get("question_target", regular_target))
+        include_case_based = shared_state.get('include_case_based', False)
+        
+        if include_case_based:
+            case_target = shared_state.get('case_target', 0)
+            final_regular_target = question_target - case_target
+        else:
+            final_regular_target = question_target
 
-        if len(all_questions) > regular_target:
-            all_questions = all_questions[:regular_target]
+        if len(all_questions) > final_regular_target:
+            all_questions = all_questions[:final_regular_target]
 
         shared_state["generated_questions"] = all_questions
         shared_state["generated_count"] = len(all_questions)
-        shared_state["missing_questions"] = max(0, regular_target - len(all_questions))
+        shared_state["missing_questions"] = max(0, final_regular_target - len(all_questions))
 
         logger.info(
             "Regular questions finalized",
-            regular_target=regular_target,
+            regular_target=final_regular_target,
+            question_target=question_target,
             generated=len(all_questions),
             missing=shared_state["missing_questions"]
         )
-
-
 
         if not all_questions:
             logger.warning("No valid questions generated from any context")
@@ -506,20 +549,24 @@ Chỉ trả về JSON thuần, không markdown, không ```.
             'hard': 'Câu hỏi khó, yêu cầu phân tích và tổng hợp kiến thức'
         }
         
-        prompt = f"""Dựa trên nội dung y khoa sau đây, hãy tạo {num_questions} câu hỏi trắc nghiệm.
+        prompt = f"""Dựa trên nội dung y khoa sau đây, hãy tạo CHÍNH XÁC {num_questions} câu hỏi trắc nghiệm.
 
-            NỘI DUNG:
-            {context}
+⚠️ QUAN TRỌNG: BẮT BUỘC tạo đủ {num_questions} câu hỏi. Không được tạo ít hơn!
 
-            YÊU CẦU:
-                - Độ khó: {difficulty_instruction.get(difficulty, difficulty_instruction['medium'])}
-                - Mỗi câu hỏi có 4 lựa chọn (A, B, C, D)
-                - Chỉ có 1 đáp án đúng
-                - Cung cấp giải thích chi tiết cho đáp án đúng
-                - Tất cả nội dung phải bằng TIẾNG VIỆT
-                - Không dùng markdown, không bọc bằng ```
+NỘI DUNG:
+{context}
 
-                Trả về JSON theo format sau:
+YÊU CẦU:
+- Số lượng câu hỏi: CHÍNH XÁC {num_questions} câu (không được thiếu!)
+- Độ khó: {difficulty_instruction.get(difficulty, difficulty_instruction['medium'])}
+- Mỗi câu hỏi có 4 lựa chọn (A, B, C, D)
+- Chỉ có 1 đáp án đúng
+- Cung cấp giải thích chi tiết cho đáp án đúng
+- Tất cả nội dung phải bằng TIẾNG VIỆT
+- Không dùng markdown, không bọc bằng ```
+- Mỗi câu hỏi phải khác nhau, không trùng lặp nội dung
+
+Trả về JSON theo format sau:
 {{
     "questions": [
         {{
@@ -538,7 +585,9 @@ Chỉ trả về JSON thuần, không markdown, không ```.
             "keywords": ["từ khóa 1", "từ khóa 2"]
         }}
     ]
-}}"""
+}}
+
+Nhắc lại: Phải tạo CHÍNH XÁC {num_questions} câu hỏi trong mảng "questions"."""
         
         return prompt
 
@@ -1051,6 +1100,128 @@ Lưu ý quan trọng:
         }
 
 
+class GeminiThinkingQuestionNode(BaseNode):
+    """
+    Node for generating questions using Gemini Thinking Mode
+    Uploads PDF directly to Gemini without RAG
+    """
+    
+    def __init__(self):
+        super().__init__("GeminiThinkingQuestion")
+        from app.core.llm_provider import GoogleGeminiThinkingProvider
+        self.provider = GoogleGeminiThinkingProvider()
+    
+    async def prep(self, shared_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare data for Gemini Thinking generation"""
+        document_ids = shared_state.get('document_ids', [])
+        
+        # Get document file paths
+        from app.api.documents import documents_db
+        pdf_files = []
+        
+        for doc_id in document_ids:
+            doc = documents_db.get(doc_id)
+            if doc and doc.get('file_type') == 'pdf':
+                pdf_files.append({
+                    'path': doc.get('file_path'),
+                    'id': doc_id,
+                    'title': doc.get('title', 'Unknown')
+                })
+        
+        if not pdf_files:
+            logger.warning("No PDF files found for Gemini Thinking mode")
+            return {'error': 'No PDF files found'}
+        
+        return {
+            'pdf_files': pdf_files,
+            'num_questions': shared_state.get('num_questions', 10),
+            'difficulty': shared_state.get('difficulty', 'medium'),
+            'use_thinking': True,
+            'use_google_search': shared_state.get('use_google_search', False),
+        }
+    
+    async def exec(self, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate questions using Gemini Thinking"""
+        if 'error' in prep_result:
+            return {'questions': [], 'error': prep_result['error']}
+        
+        all_questions = []
+        pdf_files = prep_result['pdf_files']
+        total_questions = prep_result['num_questions']
+        questions_per_file = max(1, total_questions // len(pdf_files))
+        
+        for i, pdf_file in enumerate(pdf_files):
+            # Last file gets remaining questions
+            if i == len(pdf_files) - 1:
+                num_q = total_questions - len(all_questions)
+            else:
+                num_q = questions_per_file
+            
+            if num_q <= 0:
+                continue
+            
+            logger.info(
+                "Generating questions with Gemini Thinking",
+                file=pdf_file['title'],
+                num_questions=num_q,
+                thinking=prep_result['use_thinking'],
+                search=prep_result['use_google_search']
+            )
+            
+            try:
+                result = await self.provider.generate_quiz_with_thinking(
+                    pdf_path=pdf_file['path'],
+                    num_questions=num_q,
+                    difficulty=prep_result['difficulty'],
+                    use_thinking=prep_result['use_thinking'],
+                    use_google_search=prep_result['use_google_search'],
+                    temperature=0.3
+                )
+                
+                questions = result.get('questions', [])
+                
+                # Add document_id to each question
+                for q in questions:
+                    q['document_id'] = pdf_file['id']
+                    if not q.get('source_chunk_id'):
+                        q['source_chunk_id'] = 'gemini_thinking'
+                
+                all_questions.extend(questions)
+                
+                logger.info(
+                    "Generated questions from PDF",
+                    file=pdf_file['title'],
+                    generated=len(questions),
+                    total=len(all_questions)
+                )
+                
+            except Exception as e:
+                logger.error(
+                    "Gemini Thinking generation failed",
+                    file=pdf_file['title'],
+                    error=str(e)
+                )
+                continue
+        
+        return {
+            'questions': all_questions,
+            'total': len(all_questions),
+            'format': 'quiz'
+        }
+    
+    async def post(self, shared_state: Dict[str, Any], prep_result: Any, exec_result: Dict[str, Any]) -> str:
+        """Store generated questions"""
+        shared_state['generated_questions'] = exec_result.get('questions', [])
+        shared_state['total_generated'] = len(exec_result.get('questions', []))
+        
+        logger.info(
+            "Gemini Thinking generation completed",
+            total_questions=shared_state['total_generated']
+        )
+        
+        return "default"
+
+
 # ============================================
 # Flow Builder
 # ============================================
@@ -1068,15 +1239,29 @@ def create_document_processing_flow() -> Flow:
 def create_question_generation_flow(
     llm_provider: Optional[LLMProvider] = None,
     include_case_based: bool = False,
-    enable_double_check: bool = True
+    enable_double_check: bool = False,  # Disabled permanently
+    use_gemini_thinking: bool = False
 ) -> Flow:
-    """Create a flow for question generation with optional AI double-check"""
+    """Create a flow for question generation (AI double-check removed for speed)"""
+    
+    # If using Gemini Thinking, use direct PDF upload flow
+    if use_gemini_thinking:
+        gemini_node = GeminiThinkingQuestionNode()
+        validation_node = QuestionValidationNode()
+        
+        gemini_node.add_successor(validation_node)
+        
+        return Flow(gemini_node)
+    
+    # Standard RAG-based flow (without double-check)
     retrieval_node = ContextRetrievalNode()
     question_node = QuestionGenerationNode(llm_provider)
     validation_node = QuestionValidationNode()
-    double_check_node = AIDoubleCheckNode(llm_provider)
     
     retrieval_node.add_successor(question_node)
+    
+    # Add retry loop: question_node -> question_node (on "retry")
+    question_node.add_successor(question_node, "retry")
     
     if include_case_based:
         case_node = CaseBasedQuestionNode(llm_provider)
@@ -1085,18 +1270,14 @@ def create_question_generation_flow(
     else:
         question_node.add_successor(validation_node)
     
-    # Add AI double-check as final step
-    if enable_double_check:
-        validation_node.add_successor(double_check_node)
-    
     return Flow(retrieval_node)
 
 
 def create_full_pipeline_flow(
     llm_provider: Optional[LLMProvider] = None,
-    enable_double_check: bool = True
+    enable_double_check: bool = False  # Disabled permanently
 ) -> Flow:
-    """Create a complete pipeline from document to questions with AI review"""
+    """Create a complete pipeline from document to questions (AI double-check removed)"""
     # Document processing
     ingestion_node = DocumentIngestionNode()
     embedding_node = EmbeddingNode()
@@ -1105,16 +1286,11 @@ def create_full_pipeline_flow(
     retrieval_node = ContextRetrievalNode()
     question_node = QuestionGenerationNode(llm_provider)
     validation_node = QuestionValidationNode()
-    double_check_node = AIDoubleCheckNode(llm_provider)
     
-    # Connect the flow
+    # Connect the flow (without double-check)
     ingestion_node.add_successor(embedding_node)
     embedding_node.add_successor(retrieval_node)
     retrieval_node.add_successor(question_node)
     question_node.add_successor(validation_node)
-    
-    # Add AI double-check as final step
-    if enable_double_check:
-        validation_node.add_successor(double_check_node)
     
     return Flow(ingestion_node)

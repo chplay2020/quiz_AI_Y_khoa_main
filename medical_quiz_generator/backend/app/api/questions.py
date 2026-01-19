@@ -40,14 +40,16 @@ async def generate_questions_background(
         # Get LLM provider
         llm = get_llm_provider()
         
-        # Create and run the question generation flow with AI double-check
+        # Create and run the question generation flow
         flow = create_question_generation_flow(
             llm_provider=llm,
             include_case_based=request.include_case_based,
-            enable_double_check=getattr(request, 'enable_double_check', True)
+            enable_double_check=False,  # AI double-check disabled
+            use_gemini_thinking=getattr(request, 'use_gemini_thinking', False)
         )
         
-        logger.info("Starting flow execution", task_id=task_id)
+        logger.info("Starting flow execution", task_id=task_id, 
+                   use_gemini_thinking=getattr(request, 'use_gemini_thinking', False))
 
         result = await flow.run({
             'document_ids': request.document_ids,
@@ -57,8 +59,8 @@ async def generate_questions_background(
             'topics': request.topics,
             'focus_areas': request.focus_areas,
             'language': 'vi',  # Luôn sử dụng tiếng Việt
-            'enable_double_check': getattr(request, 'enable_double_check', True),
-            'include_case_based': request.include_case_based  # Truyền vào để tính số lượng đúng
+            'include_case_based': request.include_case_based,  # Truyền vào để tính số lượng đúng
+            'use_google_search': getattr(request, 'use_google_search', False)
         })
         
         logger.info("Flow execution completed", task_id=task_id)

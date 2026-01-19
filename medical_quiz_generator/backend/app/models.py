@@ -122,7 +122,8 @@ class QuestionGenerationRequest(BaseModel):
     focus_areas: Optional[List[str]] = None
     include_case_based: bool = False
     include_explanations: bool = True
-    enable_double_check: bool = False  # Disabled by default to avoid rate limits
+    use_gemini_thinking: bool = False  # Use Gemini Thinking Mode (upload PDF directly)
+    use_google_search: bool = False  # Enable Google Search integration with Gemini
 
 
 class AIReviewResult(BaseModel):

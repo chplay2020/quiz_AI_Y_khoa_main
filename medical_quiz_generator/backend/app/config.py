@@ -27,9 +27,14 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     GOOGLE_API_KEY: Optional[str] = None
     
-    # Default LLM Provider: openai, anthropic, google
+    # Default LLM Provider: openai, anthropic, google, google-thinking
     DEFAULT_LLM_PROVIDER: str = "openai"
-    DEFAULT_MODEL: str = "gpt-4-turbo-preview"
+    DEFAULT_MODEL: str = "gpt-4o-mini"  # gpt-4o-mini is faster and cheaper, or use "gpt-4o" for better quality
+    
+    # Google Gemini Thinking Mode Settings
+    GEMINI_THINKING_MODEL: str = "gemini-3-pro-preview"  # or gemini-2.0-flash-thinking-exp, gemini-2.0-flash-exp, gemini-1.5-pro
+    USE_THINKING_MODE: bool = True  # Enable deep reasoning
+    USE_GOOGLE_SEARCH: bool = False  # Enable Google Search integration
     
     # Embedding Settings
     EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
