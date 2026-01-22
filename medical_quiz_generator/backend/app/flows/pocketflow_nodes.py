@@ -6,6 +6,9 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 import asyncio
 import json
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics.pairwise import cosine_similarity
 
 from requests import options
 import structlog
@@ -19,6 +22,81 @@ from app.core.llm_provider import LLMProvider, get_llm_provider
 from app.config import settings
 
 logger = structlog.get_logger()
+
+
+# ============================================
+# Helper Functions
+# ============================================
+
+def cluster_contexts_by_topic(
+    contexts: List[RetrievedContext],
+    rag_engine: RAGEngine,
+    max_clusters: int = None
+) -> List[List[RetrievedContext]]:
+    """
+    Cluster contexts by semantic similarity to prevent domain mixing.
+    
+    Args:
+        contexts: List of retrieved contexts
+        rag_engine: RAG engine with embedding model
+        max_clusters: Maximum number of clusters (default: auto-detect)
+    
+    Returns:
+        List of context clusters, each cluster contains related contexts
+    """
+    if len(contexts) <= 2:
+        return [contexts]  # Too few to cluster
+    
+    try:
+        # Get embeddings for all contexts
+        context_texts = [ctx.content for ctx in contexts]
+        embeddings = rag_engine.embedding_model.encode(
+            context_texts,
+            batch_size=32,
+            show_progress_bar=False,
+            convert_to_numpy=True
+        )
+        
+        # Auto-detect number of clusters based on number of contexts
+        if max_clusters is None:
+            max_clusters = min(len(contexts) // 3, 5)  # Max 5 clusters
+        
+        n_clusters = max(2, min(max_clusters, len(contexts) // 2))
+        
+        # Use Agglomerative Clustering with cosine distance
+        clustering = AgglomerativeClustering(
+            n_clusters=n_clusters,
+            metric='cosine',
+            linkage='average'
+        )
+        
+        labels = clustering.fit_predict(embeddings)
+        
+        # Group contexts by cluster
+        clusters = {}
+        for idx, label in enumerate(labels):
+            if label not in clusters:
+                clusters[label] = []
+            clusters[label].append(contexts[idx])
+        
+        # Sort clusters by size (largest first)
+        sorted_clusters = sorted(clusters.values(), key=len, reverse=True)
+        
+        logger.info(
+            "Clustered contexts by topic",
+            num_contexts=len(contexts),
+            num_clusters=len(sorted_clusters),
+            cluster_sizes=[len(c) for c in sorted_clusters]
+        )
+        
+        return sorted_clusters
+        
+    except Exception as e:
+        logger.warning(
+            "Failed to cluster contexts, using all contexts",
+            error=str(e)
+        )
+        return [contexts]
 
 
 # ============================================
@@ -201,10 +279,16 @@ class ContextRetrievalNode(BaseNode):
         if self.rag_engine is None:
             self.rag_engine = get_rag_engine()
         
+        # Lưu giá trị gốc của num_questions để không bị mất khi retry
+        if 'original_num_questions' not in shared_state:
+            shared_state['original_num_questions'] = shared_state.get('num_questions', 10)
+        
+        original_num = shared_state['original_num_questions']
+        
         return {
             'document_ids': shared_state.get('document_ids', []),
             'topics': shared_state.get('topics', []),
-            'num_contexts': shared_state.get('num_questions', 10) * 2,
+            'num_contexts': original_num * 3,  # Tăng lên 3x để có đủ context
             'focus_areas': shared_state.get('focus_areas', [])
         }
     
@@ -244,13 +328,20 @@ class QuestionGenerationNode(BatchNode):
         self.questions_per_context = 1
     
     async def prep(self, shared_state: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Prepare contexts for question generation"""
+        """Prepare contexts for question generation with domain separation"""
         contexts = shared_state.get('retrieved_contexts', [])
-        target_questions = int(shared_state.get('num_questions', 10))
+        
+        # Sử dụng original_num_questions nếu có, không dùng giá trị bị ghi đè khi retry
+        target_questions = int(shared_state.get('original_num_questions', shared_state.get('num_questions', 10)))
+        
         difficulty = shared_state.get('difficulty', 'medium')
         question_types = shared_state.get('question_types', ['single_choice'])
         language = shared_state.get('language', 'vi')
         include_case_based = shared_state.get('include_case_based', False)
+        
+        # Kiểm tra xem đây có phải là retry không
+        is_retry = shared_state.get('_retry_count', 0) > 0
+        retry_target = shared_state.get('_retry_target', 0)
         
         # FIX: Tính số câu hỏi thường = tổng - số câu lâm sàng (nếu có)
         if include_case_based:
@@ -260,19 +351,28 @@ class QuestionGenerationNode(BatchNode):
             num_case_questions = 0
             regular_target = target_questions
         
-        # Lưu thông tin để các node khác sử dụng
-        shared_state['regular_target'] = regular_target
-        shared_state['case_target'] = num_case_questions
-        shared_state['question_target'] = target_questions
+        # Lưu thông tin để các node khác sử dụng (chỉ khi không phải retry)
+        if not is_retry:
+            shared_state['regular_target'] = regular_target
+            shared_state['case_target'] = num_case_questions
+            shared_state['question_target'] = target_questions
         
-        # Tạo buffer cho câu hỏi thường (đề phòng JSON lỗi / bị filter)
-        buffer_target = regular_target + max(1, regular_target // 4)
+        # Nếu là retry, sử dụng retry_target thay vì tính lại
+        if is_retry and retry_target > 0:
+            buffer_target = retry_target
+            logger.info(
+                "RETRY: Using retry_target for question generation",
+                retry_target=retry_target,
+                retry_count=shared_state.get('_retry_count')
+            )
+        else:
+            # Tạo buffer cho câu hỏi thường (đề phòng JSON lỗi / bị filter)
+            buffer_target = regular_target + max(1, regular_target // 4)
 
         if not contexts:
             return []
 
-        # ===== FIX: CHIA CONTEXTS THEO DOCUMENT_ID =====
-        # Nhóm contexts theo document_id
+        # ===== BƯỚC 1: CHIA CONTEXTS THEO DOCUMENT_ID =====
         doc_contexts_map = {}
         for ctx in contexts:
             doc_id = getattr(ctx, 'document_id', 'unknown')
@@ -291,7 +391,7 @@ class QuestionGenerationNode(BatchNode):
         extra_questions = buffer_target % num_documents
         
         logger.info(
-            "Question generation strategy - Multi-document",
+            "Question generation strategy - Multi-document with topic clustering",
             total_target=target_questions,
             regular_target=regular_target,
             case_target=num_case_questions,
@@ -303,9 +403,12 @@ class QuestionGenerationNode(BatchNode):
             language=language
         )
 
-        # Tạo items cho mỗi document
+        # ===== BƯỚC 2: CLUSTER CONTEXTS THEO TOPIC (TRÁNH TRỘN DOMAIN) =====
         items = []
         unused_contexts = []
+        
+        # Get RAG engine for clustering
+        rag_engine = get_rag_engine()
         
         for idx, doc_id in enumerate(doc_ids):
             doc_contexts = doc_contexts_map[doc_id]
@@ -313,11 +416,39 @@ class QuestionGenerationNode(BatchNode):
             # Document đầu tiên nhận thêm extra questions
             num_questions_for_doc = questions_per_doc + (extra_questions if idx == 0 else 0)
             
-            # Lấy contexts cho document này
-            num_contexts_for_doc = min(len(doc_contexts), num_questions_for_doc)
-            selected_doc_contexts = doc_contexts[:num_contexts_for_doc]
+            # ===== NGUY HIỂM: CLUSTER CONTEXTS TRONG DOCUMENT NÀY =====
+            # Tránh trộn contexts từ nhiều chủ đề khác nhau
+            if len(doc_contexts) > 5:  # Chỉ cluster nếu có nhiều contexts
+                context_clusters = cluster_contexts_by_topic(
+                    doc_contexts, 
+                    rag_engine,
+                    max_clusters=3
+                )
+                
+                # Lấy cluster lớn nhất (chủ đề chính)
+                main_cluster = context_clusters[0]
+                
+                logger.info(
+                    f"Document {doc_id} clustered into topics",
+                    total_contexts=len(doc_contexts),
+                    num_clusters=len(context_clusters),
+                    main_cluster_size=len(main_cluster),
+                    using_main_cluster=True
+                )
+                
+                # Chỉ dùng contexts từ cluster chính
+                selected_doc_contexts = main_cluster[:num_questions_for_doc]
+                unused_contexts.extend(main_cluster[num_questions_for_doc:])
+                
+                # Lưu các cluster khác vào unused
+                for cluster in context_clusters[1:]:
+                    unused_contexts.extend(cluster)
+            else:
+                # Ít contexts, dùng hết
+                selected_doc_contexts = doc_contexts[:num_questions_for_doc]
+                unused_contexts.extend(doc_contexts[num_questions_for_doc:])
             
-            # Gộp contexts của document này
+            # Gộp contexts của cluster này
             combined_context = "\n\n".join(
                 f"[CONTEXT {i+1}]\n{ctx.content[:500]}"
                 for i, ctx in enumerate(selected_doc_contexts)
@@ -333,13 +464,10 @@ class QuestionGenerationNode(BatchNode):
                 'document_id': doc_id  # Đánh dấu document này
             })
             
-            # Lưu unused contexts
-            unused_contexts.extend(doc_contexts[num_contexts_for_doc:])
-            
             logger.info(
                 f"Prepared contexts for document {idx+1}/{num_documents}",
                 document_id=doc_id,
-                num_contexts=num_contexts_for_doc,
+                num_contexts=len(selected_doc_contexts),
                 num_questions_target=num_questions_for_doc
             )
 
@@ -365,7 +493,7 @@ class QuestionGenerationNode(BatchNode):
         system_prompt = self._get_system_prompt(language)
         
         try:
-            await asyncio.sleep(20)  # 🔥 FIX RATE LIMIT
+            await asyncio.sleep(5)  # Rate limit delay (giảm từ 20s)
             result = await self.llm.generate_structured(
                 prompt=prompt,
                 system_prompt=system_prompt,
@@ -438,7 +566,16 @@ class QuestionGenerationNode(BatchNode):
                     questions_value=str(questions)[:200]
                 )
         
-        regular_target = int(shared_state.get("regular_target", shared_state.get("num_questions", 10)))
+        # Lấy giá trị target gốc, không dùng giá trị đã bị ghi đè
+        original_target = int(shared_state.get('original_num_questions', shared_state.get('num_questions', 10)))
+        include_case_based = shared_state.get('include_case_based', False)
+        
+        # Tính regular_target từ original
+        if include_case_based:
+            case_target = max(2, original_target // 3)
+            regular_target = original_target - case_target
+        else:
+            regular_target = original_target
         
         # =========================
         # RETRY NẾU KHÔNG ĐỦ CÂU HỎI
@@ -452,6 +589,7 @@ class QuestionGenerationNode(BatchNode):
                 "Not enough questions generated, will retry",
                 generated=len(all_questions),
                 target=regular_target,
+                original_target=original_target,
                 missing=missing,
                 retry_count=retry_count
             )
@@ -459,8 +597,8 @@ class QuestionGenerationNode(BatchNode):
             # Lưu câu hỏi đã có và retry
             shared_state['_partial_questions'] = shared_state.get('_partial_questions', []) + all_questions
             shared_state['_retry_count'] = retry_count + 1
-            shared_state['num_questions'] = missing + 2  # Thêm buffer
-            shared_state['regular_target'] = missing + 2
+            # KHÔNG ghi đè num_questions - chỉ set số câu cần tạo thêm cho lần retry này
+            shared_state['_retry_target'] = missing + 2  # Thêm buffer
             
             # Dùng unused contexts nếu có
             unused = shared_state.get('unused_contexts', [])
@@ -477,21 +615,22 @@ class QuestionGenerationNode(BatchNode):
             # Clear partial
             shared_state.pop('_partial_questions', None)
             shared_state.pop('_retry_count', None)
+            shared_state.pop('_retry_target', None)
         
         # =========================
-        # CẮT ĐÚNG SỐ LƯỢNG CÂU HỎI THƯỜNG
+        # CẮT ĐÚNG SỐ LƯỢNG CÂU HỎI THƯỜNG (sử dụng original_target)
         # =========================
-        question_target = int(shared_state.get("question_target", regular_target))
-        include_case_based = shared_state.get('include_case_based', False)
-        
-        if include_case_based:
-            case_target = shared_state.get('case_target', 0)
-            final_regular_target = question_target - case_target
-        else:
-            final_regular_target = question_target
+        final_regular_target = regular_target  # Đã tính từ original_target ở trên
 
         if len(all_questions) > final_regular_target:
             all_questions = all_questions[:final_regular_target]
+        
+        logger.info(
+            "Final regular questions count",
+            original_target=original_target,
+            regular_target=regular_target,
+            generated=len(all_questions)
+        )
 
         shared_state["generated_questions"] = all_questions
         shared_state["generated_count"] = len(all_questions)
@@ -499,8 +638,8 @@ class QuestionGenerationNode(BatchNode):
 
         logger.info(
             "Regular questions finalized",
+            original_target=original_target,
             regular_target=final_regular_target,
-            question_target=question_target,
             generated=len(all_questions),
             missing=shared_state["missing_questions"]
         )
@@ -548,6 +687,13 @@ Chỉ trả về JSON thuần, không markdown, không ```.
 
 ⚠️ QUAN TRỌNG: BẮT BUỘC tạo đủ {num_questions} câu hỏi. Không được tạo ít hơn!
 
+🚨 NGUY HIỂM - TRÁNH TRỘN DOMAIN:
+- Các CONTEXT bên dưới ĐÃ ĐƯỢC PHÂN NHÓM theo cùng 1 CHỦ ĐỀ
+- TUYỆT ĐỐI chỉ tạo câu hỏi về CHỦ ĐỀ CHÍNH xuất hiện trong contexts
+- KHÔNG được kết hợp thông tin từ nhiều chủ đề khác nhau
+- Mỗi câu hỏi phải tập trung vào 1 khái niệm rõ ràng
+- Nếu contexts có vẻ không liên quan, chỉ dùng contexts có chủ đề rõ ràng nhất
+
 NỘI DUNG:
 {context}
 
@@ -560,6 +706,7 @@ YÊU CẦU:
 - Tất cả nội dung phải bằng TIẾNG VIỆT
 - Không dùng markdown, không bọc bằng ```
 - Mỗi câu hỏi phải khác nhau, không trùng lặp nội dung
+- ✅ Câu hỏi phải NHẤT QUÁN về chủ đề, không nhảy topic
 
 Trả về JSON theo format sau:
 {{
@@ -599,15 +746,15 @@ class CaseBasedQuestionNode(BaseNode):
         # Lấy số câu lâm sàng đã tính từ QuestionGenerationNode
         num_case_questions = shared_state.get('case_target', 0)
         
-        # Fallback nếu không có
+        # Fallback nếu không có - sử dụng original_num_questions
         if num_case_questions == 0:
-            target_questions = shared_state.get('question_target', shared_state.get('num_questions', 10))
+            target_questions = shared_state.get('original_num_questions', shared_state.get('num_questions', 10))
             num_case_questions = max(2, target_questions // 3)
         
         logger.info(
             "Preparing case-based questions",
             num_case_questions=num_case_questions,
-            total_target=shared_state.get('question_target')
+            original_target=shared_state.get('original_num_questions')
         )
         
         return {
@@ -634,7 +781,7 @@ class CaseBasedQuestionNode(BaseNode):
         prompt = self._build_case_prompt(combined_context, language, num_cases, difficulty)
         
         try:
-            await asyncio.sleep(20)  # Rate limit delay
+            await asyncio.sleep(5)  # Rate limit delay (giảm từ 20s)
             result = await self.llm.generate_structured(
                 prompt=prompt,
                 system_prompt=self._get_system_prompt(language),
@@ -1110,6 +1257,10 @@ class GeminiThinkingQuestionNode(BaseNode):
         """Prepare data for Gemini Thinking generation"""
         document_ids = shared_state.get('document_ids', [])
         
+        # Lưu original_num_questions
+        if 'original_num_questions' not in shared_state:
+            shared_state['original_num_questions'] = shared_state.get('num_questions', 10)
+        
         # Get document file paths
         from app.api.documents import documents_db
         pdf_files = []
@@ -1127,9 +1278,18 @@ class GeminiThinkingQuestionNode(BaseNode):
             logger.warning("No PDF files found for Gemini Thinking mode")
             return {'error': 'No PDF files found'}
         
+        # Sử dụng original_num_questions
+        num_questions = shared_state.get('original_num_questions', shared_state.get('num_questions', 10))
+        
+        logger.info(
+            "Gemini Thinking prep",
+            num_questions=num_questions,
+            num_pdf_files=len(pdf_files)
+        )
+        
         return {
             'pdf_files': pdf_files,
-            'num_questions': shared_state.get('num_questions', 10),
+            'num_questions': num_questions,
             'difficulty': shared_state.get('difficulty', 'medium'),
             'use_thinking': True,
             'use_google_search': shared_state.get('use_google_search', False),

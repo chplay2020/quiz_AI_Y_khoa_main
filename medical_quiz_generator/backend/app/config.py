@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./data/uploads"
     ALLOWED_EXTENSIONS: list = [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".txt"]
     
+    # Data Directory
+    DATA_DIR: str = "./data"
+    
     # Database Settings
     DATABASE_URL: str = "sqlite:///./data/medical_quiz.db"
     

@@ -9,6 +9,9 @@ import uuid
 from datetime import datetime
 import asyncio
 import structlog
+import json
+import os
+from pathlib import Path
 
 from app.config import settings
 from app.models import (
@@ -24,9 +27,62 @@ from app.flows import create_question_generation_flow
 logger = structlog.get_logger()
 router = APIRouter(prefix="/questions", tags=["Questions"])
 
-# In-memory storage (replace with database in production)
+# Persistent storage paths
+QUESTIONS_DB_FILE = Path(settings.DATA_DIR) / "questions_db.json"
+TASKS_DB_FILE = Path(settings.DATA_DIR) / "generation_tasks.json"
+
+# In-memory storage (with persistent backup)
 questions_db = {}
 generation_tasks = {}
+
+
+def load_persistent_data():
+    """Load data from persistent storage"""
+    global questions_db, generation_tasks
+    
+    # Load questions
+    if QUESTIONS_DB_FILE.exists():
+        try:
+            with open(QUESTIONS_DB_FILE, 'r', encoding='utf-8') as f:
+                questions_db = json.load(f)
+            logger.info("Loaded questions from persistent storage", count=len(questions_db))
+        except Exception as e:
+            logger.error("Failed to load questions", error=str(e))
+    
+    # Load tasks
+    if TASKS_DB_FILE.exists():
+        try:
+            with open(TASKS_DB_FILE, 'r', encoding='utf-8') as f:
+                generation_tasks = json.load(f)
+            logger.info("Loaded tasks from persistent storage", count=len(generation_tasks))
+        except Exception as e:
+            logger.error("Failed to load tasks", error=str(e))
+
+
+def save_questions_db():
+    """Save questions to persistent storage"""
+    try:
+        QUESTIONS_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(QUESTIONS_DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump(questions_db, f, ensure_ascii=False, indent=2)
+        logger.debug("Saved questions to persistent storage", count=len(questions_db))
+    except Exception as e:
+        logger.error("Failed to save questions", error=str(e))
+
+
+def save_tasks_db():
+    """Save tasks to persistent storage"""
+    try:
+        TASKS_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(TASKS_DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump(generation_tasks, f, ensure_ascii=False, indent=2)
+        logger.debug("Saved tasks to persistent storage", count=len(generation_tasks))
+    except Exception as e:
+        logger.error("Failed to save tasks", error=str(e))
+
+
+# Load data on startup
+load_persistent_data()
 
 
 async def generate_questions_background(
@@ -120,6 +176,17 @@ async def generate_questions_background(
             questions_db[question_id] = q
             stored_questions.append(q)
         
+        logger.info(
+            "Stored questions in database",
+            task_id=task_id,
+            num_stored=len(stored_questions),
+            question_ids=[q['id'] for q in stored_questions],
+            total_in_db=len(questions_db)
+        )
+        
+        # Save to persistent storage
+        save_questions_db()
+        
         # Update task status
         generation_tasks[task_id]['status'] = 'completed'
         generation_tasks[task_id]['questions'] = stored_questions
@@ -127,6 +194,9 @@ async def generate_questions_background(
         generation_tasks[task_id]['generated_questions'] = len(stored_questions)
         generation_tasks[task_id]['progress'] = 1.0
         generation_tasks[task_id]['review_stats'] = review_stats
+        
+        # Save tasks to persistent storage
+        save_tasks_db()
         
         logger.info(
             "Question generation completed",
@@ -177,6 +247,9 @@ async def generate_questions(
         'error': None,
         'created_at': datetime.utcnow().isoformat()
     }
+    
+    # Save tasks
+    save_tasks_db()
     
     # Start background task
     background_tasks.add_task(
@@ -263,7 +336,21 @@ async def get_question(question_id: str):
 @router.put("/{question_id}", response_model=APIResponse)
 async def update_question(question_id: str, updates: dict):
     """Update a question"""
+    logger.info(
+        "Update question request",
+        question_id=question_id,
+        updates_keys=list(updates.keys()),
+        total_questions_in_db=len(questions_db),
+        question_exists=question_id in questions_db
+    )
+    
     if question_id not in questions_db:
+        # Log all available IDs for debugging
+        logger.error(
+            "Question not found in database",
+            question_id=question_id,
+            available_ids=list(questions_db.keys())[:10]  # First 10 IDs
+        )
         raise HTTPException(status_code=404, detail="Question not found")
     
     question = questions_db[question_id]
@@ -277,6 +364,11 @@ async def update_question(question_id: str, updates: dict):
             question[field] = updates[field]
     
     question['updated_at'] = datetime.utcnow().isoformat()
+    
+    # Save to persistent storage
+    save_questions_db()
+    
+    logger.info("Question updated successfully", question_id=question_id)
     
     return APIResponse(
         success=True,
@@ -292,6 +384,9 @@ async def delete_question(question_id: str):
         raise HTTPException(status_code=404, detail="Question not found")
     
     del questions_db[question_id]
+    
+    # Save to persistent storage
+    save_questions_db()
     
     return APIResponse(
         success=True,
