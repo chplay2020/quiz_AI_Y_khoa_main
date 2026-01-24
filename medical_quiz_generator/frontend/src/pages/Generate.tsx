@@ -4,7 +4,8 @@ import { useNavigate } from 'react-router-dom'
 import {
     SparklesIcon,
     DocumentTextIcon,
-    AdjustmentsHorizontalIcon
+    AdjustmentsHorizontalIcon,
+    ShieldCheckIcon
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
