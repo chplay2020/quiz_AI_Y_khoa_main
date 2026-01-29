@@ -28,6 +28,11 @@ class ExportFormat(str, Enum):
     EXCEL = "excel"
 
 
+class ExportMode(str, Enum):
+    TEACHER = "teacher"  # Full export with answers and explanations
+    STUDENT = "student"  # Exam-style without answers and explanations
+
+
 # Document Models
 class DocumentBase(BaseModel):
     title: str
@@ -174,6 +179,7 @@ class ExportRequest(BaseModel):
     include_explanations: bool = True
     shuffle_questions: bool = False
     shuffle_options: bool = False
+    export_mode: Optional[ExportMode] = ExportMode.TEACHER  # teacher (full) or student (exam style)
 
 
 class ExportResponse(BaseModel):

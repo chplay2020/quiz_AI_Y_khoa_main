@@ -18,7 +18,7 @@ from app.models import (
     QuestionGenerationRequest, QuestionGenerationResponse,
     GenerationStatus, QuestionResponse, APIResponse,
     SearchRequest, SearchResponse, SearchResult,
-    QuestionStats, ExportRequest, ExportResponse, ExportFormat
+    QuestionStats, ExportRequest, ExportResponse, ExportFormat, ExportMode
 )
 from app.core.rag_engine import get_rag_engine
 from app.core.llm_provider import get_llm_provider
@@ -425,18 +425,25 @@ async def search_content(request: SearchRequest):
 @router.post("/export", response_model=APIResponse)
 async def export_questions(request: ExportRequest):
     """Export questions in various formats"""
+    # Determine export mode settings
+    is_student_mode = request.export_mode == ExportMode.STUDENT
+    
+    # For student mode, always hide answers and explanations
+    include_answers = False if is_student_mode else request.include_answers
+    include_explanations = False if is_student_mode else request.include_explanations
+    
     # Get questions
     questions = []
     for qid in request.question_ids:
         if qid in questions_db:
             q = questions_db[qid].copy()
             
-            if not request.include_answers:
+            if not include_answers:
                 q.pop('correct_answer', None)
                 for opt in q.get('options', []):
                     opt.pop('is_correct', None)
             
-            if not request.include_explanations:
+            if not include_explanations:
                 q.pop('explanation', None)
             
             questions.append(q)
@@ -463,68 +470,145 @@ async def export_questions(request: ExportRequest):
             from docx.enum.text import WD_ALIGN_PARAGRAPH
             import io
             import base64
+            from datetime import datetime
             
             doc = Document()
             
-            # Title
-            title = doc.add_heading('BỘ CÂU HỎI TRẮC NGHIỆM Y KHOA', 0)
-            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-            # Subtitle with count
-            subtitle = doc.add_paragraph(f'Tổng số: {len(questions)} câu hỏi')
-            subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-            doc.add_paragraph()  # Empty line
-            
-            for i, q in enumerate(questions, 1):
-                # Question number and difficulty
-                difficulty_map = {'easy': 'Dễ', 'medium': 'Trung bình', 'hard': 'Khó'}
-                diff_text = difficulty_map.get(q.get('difficulty', 'medium'), 'Trung bình')
+            if is_student_mode:
+                # ========== STUDENT MODE - Exam Style ==========
+                # Header - Exam title
+                title = doc.add_heading('ĐỀ THI TRẮC NGHIỆM Y KHOA', 0)
+                title.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 
-                q_header = doc.add_paragraph()
-                q_header_run = q_header.add_run(f'Câu {i}')
-                q_header_run.bold = True
-                q_header_run.font.size = Pt(12)
-                q_header.add_run(f' [{diff_text}]')
+                # Exam info
+                exam_info = doc.add_paragraph()
+                exam_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                exam_info.add_run(f'Số câu hỏi: {len(questions)} câu')
+                doc.add_paragraph()
                 
-                # Topic if available
-                if q.get('topic'):
-                    q_header.add_run(f' - {q.get("topic")}')
+                # Instructions
+                instructions = doc.add_paragraph()
+                instr_run = instructions.add_run('HƯỚNG DẪN: ')
+                instr_run.bold = True
+                instructions.add_run('Chọn một đáp án đúng nhất cho mỗi câu hỏi.')
+                doc.add_paragraph()
                 
-                # Question text (đã chứa scenario nếu là câu lâm sàng)
-                q_text = q.get('question_text', '')
-                q_para = doc.add_paragraph()
-                q_para.add_run(q_text)
+                # Student info section
+                info_para = doc.add_paragraph()
+                info_para.add_run('Họ và tên: ').bold = True
+                info_para.add_run('_' * 40)
                 
-                # Options
-                for opt in q.get('options', []):
-                    opt_para = doc.add_paragraph()
-                    opt_text = f"    {opt.get('id', '')}. {opt.get('text', '')}"
+                info_para2 = doc.add_paragraph()
+                info_para2.add_run('Mã sinh viên: ').bold = True
+                info_para2.add_run('_' * 30)
+                info_para2.add_run('    ')
+                info_para2.add_run('Lớp: ').bold = True
+                info_para2.add_run('_' * 20)
+                
+                doc.add_paragraph()
+                doc.add_paragraph('─' * 60)
+                doc.add_paragraph()
+                
+                # Questions - clean exam format
+                for i, q in enumerate(questions, 1):
+                    # Question number with text
+                    q_para = doc.add_paragraph()
+                    q_num_run = q_para.add_run(f'Câu {i}. ')
+                    q_num_run.bold = True
+                    q_num_run.font.size = Pt(11)
+                    q_para.add_run(q.get('question_text', ''))
                     
-                    if request.include_answers and opt.get('is_correct'):
-                        opt_run = opt_para.add_run(opt_text + ' ✓')
-                        opt_run.bold = True
-                        opt_run.font.color.rgb = RGBColor(0, 128, 0)  # Green
-                    else:
-                        opt_para.add_run(opt_text)
+                    # Options - clean format without any marking
+                    for opt in q.get('options', []):
+                        opt_para = doc.add_paragraph()
+                        opt_para.add_run(f"    {opt.get('id', '')}. {opt.get('text', '')}")
+                    
+                    doc.add_paragraph()  # Space between questions
                 
-                # Correct answer
-                if request.include_answers and q.get('correct_answer'):
-                    answer_para = doc.add_paragraph()
-                    answer_run = answer_para.add_run(f"➤ Đáp án đúng: {q.get('correct_answer')}")
-                    answer_run.bold = True
-                    answer_run.font.color.rgb = RGBColor(0, 100, 0)
+                # Answer sheet section at the end
+                doc.add_paragraph('─' * 60)
+                answer_sheet_title = doc.add_paragraph()
+                answer_sheet_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                sheet_run = answer_sheet_title.add_run('BẢNG TRẢ LỜI')
+                sheet_run.bold = True
+                sheet_run.font.size = Pt(14)
+                doc.add_paragraph()
                 
-                # Explanation
-                if request.include_explanations and q.get('explanation'):
-                    exp_para = doc.add_paragraph()
-                    exp_run = exp_para.add_run('💡 Giải thích: ')
-                    exp_run.bold = True
-                    exp_run.font.color.rgb = RGBColor(0, 0, 139)  # Dark blue
-                    exp_para.add_run(q.get('explanation', ''))
+                # Create answer grid (5 columns)
+                table = doc.add_table(rows=(len(questions) + 4) // 5 + 1, cols=5)
+                table.style = 'Table Grid'
                 
-                # Add separator
-                doc.add_paragraph('─' * 50)
+                for i in range(len(questions)):
+                    row_idx = i // 5
+                    col_idx = i % 5
+                    cell = table.rows[row_idx].cells[col_idx]
+                    cell.text = f'Câu {i+1}: ___'
+                
+                filename = f'de_thi_trac_nghiem_{datetime.now().strftime("%Y%m%d_%H%M%S")}.docx'
+                
+            else:
+                # ========== TEACHER MODE - Full Export ==========
+                # Title
+                title = doc.add_heading('BỘ CÂU HỎI TRẮC NGHIỆM Y KHOA', 0)
+                title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Subtitle with count
+                subtitle = doc.add_paragraph(f'Tổng số: {len(questions)} câu hỏi')
+                subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                doc.add_paragraph()  # Empty line
+                
+                for i, q in enumerate(questions, 1):
+                    # Question number and difficulty
+                    difficulty_map = {'easy': 'Dễ', 'medium': 'Trung bình', 'hard': 'Khó'}
+                    diff_text = difficulty_map.get(q.get('difficulty', 'medium'), 'Trung bình')
+                    
+                    q_header = doc.add_paragraph()
+                    q_header_run = q_header.add_run(f'Câu {i}')
+                    q_header_run.bold = True
+                    q_header_run.font.size = Pt(12)
+                    q_header.add_run(f' [{diff_text}]')
+                    
+                    # Topic if available
+                    if q.get('topic'):
+                        q_header.add_run(f' - {q.get("topic")}')
+                    
+                    # Question text (đã chứa scenario nếu là câu lâm sàng)
+                    q_text = q.get('question_text', '')
+                    q_para = doc.add_paragraph()
+                    q_para.add_run(q_text)
+                    
+                    # Options
+                    for opt in q.get('options', []):
+                        opt_para = doc.add_paragraph()
+                        opt_text = f"    {opt.get('id', '')}. {opt.get('text', '')}"
+                        
+                        if include_answers and opt.get('is_correct'):
+                            opt_run = opt_para.add_run(opt_text + ' ✓')
+                            opt_run.bold = True
+                            opt_run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                        else:
+                            opt_para.add_run(opt_text)
+                    
+                    # Correct answer
+                    if include_answers and q.get('correct_answer'):
+                        answer_para = doc.add_paragraph()
+                        answer_run = answer_para.add_run(f"➤ Đáp án đúng: {q.get('correct_answer')}")
+                        answer_run.bold = True
+                        answer_run.font.color.rgb = RGBColor(0, 100, 0)
+                    
+                    # Explanation
+                    if include_explanations and q.get('explanation'):
+                        exp_para = doc.add_paragraph()
+                        exp_run = exp_para.add_run('💡 Giải thích: ')
+                        exp_run.bold = True
+                        exp_run.font.color.rgb = RGBColor(0, 0, 139)  # Dark blue
+                        exp_para.add_run(q.get('explanation', ''))
+                    
+                    # Add separator
+                    doc.add_paragraph('─' * 50)
+                
+                filename = 'cau_hoi_trac_nghiem_giao_vien.docx'
             
             # Save to bytes
             file_stream = io.BytesIO()
@@ -538,10 +622,11 @@ async def export_questions(request: ExportRequest):
                 success=True,
                 data={
                     'file_content': doc_base64,
-                    'filename': 'cau_hoi_trac_nghiem.docx',
+                    'filename': filename,
                     'format': 'word',
                     'mime_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                    'total': len(questions)
+                    'total': len(questions),
+                    'export_mode': 'student' if is_student_mode else 'teacher'
                 }
             )
             
