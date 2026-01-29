@@ -195,6 +195,7 @@ export const questionsApi = {
         include_explanations?: boolean
         shuffle_questions?: boolean
         shuffle_options?: boolean
+        export_mode?: 'teacher' | 'student'
     }) => {
         const response = await api.post('/questions/export', {
             question_ids: questionIds,
