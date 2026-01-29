@@ -1,11 +1,14 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
     MagnifyingGlassIcon,
     FunnelIcon,
     TrashIcon,
     ArrowDownTrayIcon,
-    PencilIcon
+    PencilIcon,
+    AcademicCapIcon,
+    UserIcon,
+    ChevronDownIcon
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
@@ -16,6 +19,8 @@ import QuestionEditModal from '../components/QuestionEditModal'
 
 export default function Questions() {
     const [searchQuery, setSearchQuery] = useState('')
+    const [showWordDropdown, setShowWordDropdown] = useState(false)
+    const wordDropdownRef = useRef<HTMLDivElement>(null)
     const [filters, setFilters] = useState({
         difficulty: '',
         question_type: '',
@@ -27,6 +32,17 @@ export default function Questions() {
 
     const queryClient = useQueryClient()
     const { selectedQuestions, toggleQuestionSelection, clearQuestionSelection } = useAppStore()
+
+    // Close dropdown when clicking outside
+    useEffect(() => {
+        function handleClickOutside(event: MouseEvent) {
+            if (wordDropdownRef.current && !wordDropdownRef.current.contains(event.target as Node)) {
+                setShowWordDropdown(false)
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside)
+        return () => document.removeEventListener('mousedown', handleClickOutside)
+    }, [])
 
     const { data, isLoading } = useQuery({
         queryKey: ['questions', filters],
@@ -70,7 +86,7 @@ export default function Questions() {
         )
         : questions
 
-    const handleExport = async (format: 'json' | 'word' | 'pdf' | 'excel') => {
+    const handleExport = async (format: 'json' | 'word' | 'pdf' | 'excel', exportMode: 'teacher' | 'student' = 'teacher') => {
         if (selectedQuestions.length === 0) {
             toast.error('Vui lòng chọn ít nhất một câu hỏi để xuất')
             return
@@ -78,8 +94,9 @@ export default function Questions() {
 
         try {
             const result = await questionsApi.export(selectedQuestions, format, {
-                include_answers: true,
-                include_explanations: true,
+                include_answers: exportMode === 'teacher',
+                include_explanations: exportMode === 'teacher',
+                export_mode: exportMode,
             })
 
             if (format === 'json') {
@@ -114,7 +131,7 @@ export default function Questions() {
                 a.download = filename
                 a.click()
                 URL.revokeObjectURL(url)
-                toast.success('Đã xuất file Word')
+                toast.success(exportMode === 'teacher' ? 'Đã xuất file Word (Giáo viên)' : 'Đã xuất đề thi Word (Sinh viên)')
             }
         } catch (error) {
             toast.error('Không thể xuất file')
@@ -158,14 +175,51 @@ export default function Questions() {
                         <ArrowDownTrayIcon className="w-4 h-4 mr-2" />
                         Xuất JSON
                     </button>
-                    <button
-                        onClick={() => handleExport('word')}
-                        className="btn-secondary flex items-center"
-                        disabled={selectedQuestions.length === 0}
-                    >
-                        <ArrowDownTrayIcon className="w-4 h-4 mr-2" />
-                        Xuất Word
-                    </button>
+
+                    {/* Word Export Dropdown */}
+                    <div className="relative" ref={wordDropdownRef}>
+                        <button
+                            onClick={() => setShowWordDropdown(!showWordDropdown)}
+                            className="btn-secondary flex items-center"
+                            disabled={selectedQuestions.length === 0}
+                        >
+                            <ArrowDownTrayIcon className="w-4 h-4 mr-2" />
+                            Xuất Word
+                            <ChevronDownIcon className="w-4 h-4 ml-1" />
+                        </button>
+
+                        {showWordDropdown && selectedQuestions.length > 0 && (
+                            <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
+                                <button
+                                    onClick={() => {
+                                        handleExport('word', 'teacher')
+                                        setShowWordDropdown(false)
+                                    }}
+                                    className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-3"
+                                >
+                                    <AcademicCapIcon className="w-5 h-5 text-blue-600" />
+                                    <div>
+                                        <div className="font-medium text-gray-900">Giáo viên</div>
+                                        <div className="text-xs text-gray-500">Đầy đủ đáp án & giải thích</div>
+                                    </div>
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        handleExport('word', 'student')
+                                        setShowWordDropdown(false)
+                                    }}
+                                    className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center gap-3"
+                                >
+                                    <UserIcon className="w-5 h-5 text-green-600" />
+                                    <div>
+                                        <div className="font-medium text-gray-900">Sinh viên</div>
+                                        <div className="text-xs text-gray-500">Định dạng đề thi (không đáp án)</div>
+                                    </div>
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
                     <button
                         onClick={handleBulkDelete}
                         className="btn-secondary flex items-center text-red-600 hover:bg-red-50"
